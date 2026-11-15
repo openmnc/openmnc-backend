@@ -74,14 +74,27 @@ def verify_token(token: str) -> str:
 
 async def get_current_admin(token: str = Depends(oauth2_scheme)) -> str:
     """
-    FastAPI dependency — extracts and validates admin JWT.
+    FastAPI dependency — extracts and validates admin or authorized staff JWT.
     Raises HTTP 401 if invalid.
     """
     email = verify_token(token)
-    if email.lower() != ADMIN_EMAIL.lower():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Admin access only",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return email
+    email_clean = email.lower()
+    if email_clean == ADMIN_EMAIL.lower():
+        return email_clean
+
+    try:
+        from database import get_collection
+        col = get_collection("site_settings")
+        staff_doc = await col.find_one({"_id": "authorized_staff"})
+        if staff_doc:
+            allowed_list = [s.lower() for s in staff_doc.get("emails", [])]
+            if email_clean in allowed_list:
+                return email_clean
+    except Exception:
+        pass
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Admin or authorized staff access only",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
