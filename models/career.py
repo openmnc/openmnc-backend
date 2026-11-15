@@ -20,6 +20,12 @@ class CareerBase(BaseModel):
     type: str = Field("full-time", example="full-time")  # "full-time", "part-time", "contract", "internship", "remote"
     experience_level: str = Field("Mid-Senior", example="Mid-Senior")  # "Entry-Level", "Mid-Level", "Senior", "Internship"
     salary_range: Optional[str] = Field("Competitive + Performance Bonuses", example="₹6,00,000 - ₹12,00,000 / year")
+    
+    # Enhanced internship & schedule fields
+    internship_duration: Optional[str] = Field(None, example="3 Months")  # "1 Month", "2 Months", "3 Months", "6 Months", "Flexible"
+    stipend_range: Optional[str] = Field(None, example="₹5,000 - ₹10,000 / month")  # e.g., "₹1,000 - ₹5,000", "₹5,000 - ₹10,000"
+    working_days: Optional[str] = Field("5 Days / Week (Mon-Fri)", example="5 Days / Week")
+    
     description: str = Field(..., example="We are looking for an ambitious engineer to lead client AI integrations and in-house product development.")
     responsibilities: List[str] = Field(default_factory=list, example=["Architect scalable backend microservices", "Deploy LLM agents"])
     requirements: List[str] = Field(default_factory=list, example=["3+ years Python / React experience", "Experience with FastAPI & MongoDB"])
@@ -39,6 +45,9 @@ class CareerUpdate(BaseModel):
     type: Optional[str] = None
     experience_level: Optional[str] = None
     salary_range: Optional[str] = None
+    internship_duration: Optional[str] = None
+    stipend_range: Optional[str] = None
+    working_days: Optional[str] = None
     description: Optional[str] = None
     responsibilities: Optional[List[str]] = None
     requirements: Optional[List[str]] = None
@@ -54,7 +63,7 @@ class CareerOut(CareerBase):
 
 
 # ---------------------------------------------------------------------------
-# Candidate Applications (Zero-Storage in MongoDB: Resume in Google Drive)
+# Candidate Applications (Zero-Storage in MongoDB: Resume in Google Drive or Cloudinary CDN)
 # ---------------------------------------------------------------------------
 
 class JobApplicationCreate(BaseModel):
@@ -64,8 +73,13 @@ class JobApplicationCreate(BaseModel):
     candidate_email: EmailStr
     candidate_phone: Optional[str] = None
     
-    # Zero Storage in Mongo: Resume stored in Google Drive or external link
-    resume_google_drive_url: str = Field(..., example="https://drive.google.com/file/d/xyz/view")
+    # Streamlined Candidate Info
+    education_level: Optional[str] = Field("Bachelor's / Undergraduate", example="Bachelor's / Undergraduate")
+    experience_status: Optional[str] = Field("Fresher / College Student", example="Fresher / College Student")
+    
+    # Direct File Upload (Cloudinary CDN URL) OR Google Drive URL
+    resume_file_url: Optional[str] = None
+    resume_google_drive_url: Optional[str] = None
     portfolio_or_github_url: Optional[str] = None
     linkedin_url: Optional[str] = None
     cover_note: Optional[str] = Field(None, max_length=2000)
@@ -87,7 +101,10 @@ class JobApplicationOut(BaseModel):
     candidate_name: str
     candidate_email: str
     candidate_phone: Optional[str] = None
-    resume_google_drive_url: str
+    education_level: Optional[str] = None
+    experience_status: Optional[str] = None
+    resume_file_url: Optional[str] = None
+    resume_google_drive_url: Optional[str] = None
     portfolio_or_github_url: Optional[str] = None
     linkedin_url: Optional[str] = None
     cover_note: Optional[str] = None

@@ -12,14 +12,18 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional, List
 
+import os
+import re
+import uuid
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
 from pydantic import EmailStr
 
 from auth import get_current_admin, require_editor
 from database import get_collection
 from google_service import append_candidate_to_google_sheet
 from webhook_service import trigger_deploy_hook
+from cloudinary_service import is_cloudinary_configured, upload_document_to_cloudinary
 from models.career import (
     CareerCreate,
     CareerOut,
@@ -149,17 +153,77 @@ async def delete_job(
 # Candidate Applications (Zero-Storage, Google Sheets Sync, Status Tracking)
 # ---------------------------------------------------------------------------
 
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx"}
+MAX_RESUME_SIZE = 10 * 1024 * 1024  # 10 MB limit
+
+
+@router.post("/upload-resume")
+async def upload_candidate_resume(file: UploadFile = File(...)):
+    """
+    Direct candidate resume upload endpoint.
+    Accepts PDF, DOC, DOCX up to 10MB.
+    Uploads directly to Cloudinary CDN or saves safely to local storage,
+    returning a clean secure URL.
+    """
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type '{ext}'. Please upload a PDF or Word document (.pdf, .doc, .docx)."
+        )
+
+    content = await file.read()
+    if len(content) > MAX_RESUME_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File size exceeds 10MB limit. Please compress or link via Google Drive."
+        )
+
+    clean_base = re.sub(r"[^a-zA-Z0-9_\-]", "_", os.path.splitext(file.filename or "resume")[0])
+    safe_filename = f"{clean_base}_{uuid.uuid4().hex[:8]}{ext}"
+
+    # 1. Cloudinary upload if configured
+    if is_cloudinary_configured():
+        try:
+            result = await upload_document_to_cloudinary(content, safe_filename)
+            return {"url": result["url"], "filename": safe_filename, "storage": "cloudinary"}
+        except Exception as e:
+            # Fall back to local storage if Cloudinary fails
+            pass
+
+    # 2. Local uploads folder fallback
+    local_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", "resumes")
+    os.makedirs(local_dir, exist_ok=True)
+    local_path = os.path.join(local_dir, safe_filename)
+    with open(local_path, "wb") as f:
+        f.write(content)
+
+    return {
+        "url": f"/uploads/resumes/{safe_filename}",
+        "filename": safe_filename,
+        "storage": "local",
+    }
+
+
 @router.post("/apply", response_model=JobApplicationOut, status_code=status.HTTP_201_CREATED)
 async def submit_job_application(payload: JobApplicationCreate):
     """
     Candidate submits an application.
-    - Zero-Storage: Resume URL points to candidate's Google Drive.
+    - Zero-Storage: Resume URL points to Cloudinary CDN or Google Drive.
     - Automatically synced to HR Google Sheet.
     - Status set to 'Applied'.
     """
+    data = payload.model_dump()
+
+    # Validation: Must have either uploaded resume or Google Drive link
+    if not data.get("resume_google_drive_url") and not data.get("resume_file_url"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please provide your resume by uploading a file or pasting a Google Drive link."
+        )
+
     app_col = get_collection("job_applications")
     now = datetime.now(timezone.utc)
-    data = payload.model_dump()
     data["status"] = "Applied"
     data["applied_at"] = now
     data["updated_at"] = now

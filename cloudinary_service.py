@@ -62,3 +62,46 @@ async def upload_image_to_cloudinary(
     except Exception as e:
         logger.error(f"[Cloudinary] Upload failed: {e}")
         raise RuntimeError(f"Cloudinary upload failed: {str(e)}")
+
+
+async def upload_document_to_cloudinary(
+    file_bytes: bytes,
+    filename: str,
+    folder: str = "openmnc_resumes",
+) -> Dict[str, Any]:
+    """
+    Uploads resumes and documents (PDF, DOCX) to Cloudinary.
+    Uses resource_type='auto' to properly store non-image raw documents.
+    """
+    if not is_cloudinary_configured():
+        logger.warning("[Cloudinary] Credentials not configured. Please set Cloudinary keys in .env.")
+        raise ValueError("Cloudinary credentials are not configured in environment variables.")
+
+    try:
+        import cloudinary
+        import cloudinary.uploader
+
+        cloudinary.config(
+            cloud_name=CLOUDINARY_CLOUD_NAME,
+            api_key=CLOUDINARY_API_KEY,
+            api_secret=CLOUDINARY_API_SECRET,
+            secure=True,
+        )
+
+        response = cloudinary.uploader.upload(
+            file_bytes,
+            folder=folder,
+            resource_type="auto",
+            public_id=f"resume_{filename}",
+            overwrite=True,
+        )
+
+        return {
+            "url": response.get("secure_url"),
+            "public_id": response.get("public_id"),
+            "format": response.get("format"),
+            "bytes": response.get("bytes"),
+        }
+    except Exception as e:
+        logger.error(f"[Cloudinary] Document upload failed: {e}")
+        raise RuntimeError(f"Cloudinary document upload failed: {str(e)}")
