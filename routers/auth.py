@@ -712,35 +712,6 @@ async def email_diagnostics():
     }
 
 
-@router.delete("/team/{email}")
-async def revoke_team_member(email: str, user: dict = Depends(require_admin)):
-    """
-    Tier 1 Admin only: Revokes a team member's access or cancels an invitation.
-    STRICT SECURITY RULE:
-    The Owner account (amit@openmnc.com) is permanently protected and CANNOT be deleted or revoked!
-    """
-    email_clean = email.strip().lower()
-    stored_admin_email, _ = await get_effective_admin_info()
-    all_owner_emails = {stored_admin_email.lower(), ADMIN_EMAIL.lower(), *PERMANENT_OWNER_EMAILS}
-
-    if email_clean in all_owner_emails:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Security Violation: The Owner Administrator account ({email_clean}) is permanently protected and cannot be revoked or deleted."
-        )
-
-    team_col = get_collection("team_members")
-    invites_col = get_collection("team_invitations")
-
-    await team_col.update_one(
-        {"_id": email_clean},
-        {"$set": {"status": "revoked", "revoked_at": datetime.now(timezone.utc).isoformat()}},
-    )
-    await invites_col.delete_many({"email": email_clean})
-
-    return {"status": "ok", "message": f"Access for {email_clean} has been revoked."}
-
-
 @router.get("/team/verify-invite")
 async def verify_invitation(token: str = Query(..., description="Invitation token")):
     """
@@ -803,6 +774,38 @@ async def accept_invitation(req: AcceptInviteRequest):
         "email": email_clean,
         "role": role,
     }
+
+
+# IMPORTANT: Keep this wildcard DELETE route LAST — it must come after all literal
+# /team/... routes to prevent FastAPI matching "verify-invite", "accept-invite",
+# "resend-invite" etc. as the {email} path parameter (which causes "Method Not Allowed").
+@router.delete("/team/{email}")
+async def revoke_team_member(email: str, user: dict = Depends(require_admin)):
+    """
+    Tier 1 Admin only: Revokes a team member's access or cancels an invitation.
+    STRICT SECURITY RULE:
+    The Owner account (amit@openmnc.com) is permanently protected and CANNOT be deleted or revoked!
+    """
+    email_clean = email.strip().lower()
+    stored_admin_email, _ = await get_effective_admin_info()
+    all_owner_emails = {stored_admin_email.lower(), ADMIN_EMAIL.lower(), *PERMANENT_OWNER_EMAILS}
+
+    if email_clean in all_owner_emails:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Security Violation: The Owner Administrator account ({email_clean}) is permanently protected and cannot be revoked or deleted."
+        )
+
+    team_col = get_collection("team_members")
+    invites_col = get_collection("team_invitations")
+
+    await team_col.update_one(
+        {"_id": email_clean},
+        {"$set": {"status": "revoked", "revoked_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    await invites_col.delete_many({"email": email_clean})
+
+    return {"status": "ok", "message": f"Access for {email_clean} has been revoked."}
 
 
 # ---------------------------------------------------------------------------
