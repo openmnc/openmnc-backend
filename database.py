@@ -3,6 +3,8 @@ Motor async MongoDB client for OpenMNC backend.
 """
 
 import os
+import asyncio
+import certifi
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from dotenv import load_dotenv
 
@@ -17,7 +19,10 @@ _client: AsyncIOMotorClient | None = None
 def get_client() -> AsyncIOMotorClient:
     global _client
     if _client is None:
-        _client = AsyncIOMotorClient(MONGODB_URI)
+        kwargs = {}
+        if "mongodb+srv://" in MONGODB_URI or "ssl=true" in MONGODB_URI.lower() or "tls=true" in MONGODB_URI.lower():
+            kwargs["tlsCAFile"] = certifi.where()
+        _client = AsyncIOMotorClient(MONGODB_URI, **kwargs)
     return _client
 
 
@@ -31,10 +36,14 @@ def get_collection(name: str):
 
 async def connect_db() -> None:
     """Call on app startup to verify connection."""
-    client = get_client()
-    # Ping to verify connection
-    await client.admin.command("ping")
-    print(f"[DB] Connected to MongoDB — database: {DB_NAME}")
+    try:
+        client = get_client()
+        # Ping to verify connection with a short timeout so the app can still boot
+        await asyncio.wait_for(client.admin.command("ping"), timeout=8.0)
+        print(f"[DB] Connected to MongoDB — database: {DB_NAME}")
+    except Exception as e:
+        print(f"[DB WARNING] Initial MongoDB ping failed: {e}")
+        print("[DB NOTE] Server will continue running. Please ensure your MongoDB Atlas IP Access List includes 0.0.0.0/0 (Allow access from anywhere).")
 
 
 async def close_db() -> None:
