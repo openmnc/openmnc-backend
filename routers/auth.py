@@ -47,14 +47,14 @@ def get_frontend_url(request: Optional[Request] = None) -> str:
     (https://www.openmnc.com) instead of an unreachable localhost address.
     """
     env_url = (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
-    if env_url and "localhost" not in env_url and "127.0.0.1" not in env_url:
+    if env_url and not any(h in env_url.lower() for h in ["localhost", "127.0.0.1", "0.0.0.0", ":5173", ":3000"]):
         return env_url
     if request:
         origin = request.headers.get("origin") or request.headers.get("referer")
         if origin:
             from urllib.parse import urlparse
             parsed = urlparse(origin)
-            if parsed.scheme and parsed.netloc and "localhost" not in parsed.netloc:
+            if parsed.scheme and parsed.netloc and not any(h in parsed.netloc.lower() for h in ["localhost", "127.0.0.1", "0.0.0.0", ":5173", ":3000"]):
                 return f"{parsed.scheme}://{parsed.netloc}"
     return "https://www.openmnc.com"
 
@@ -646,7 +646,7 @@ async def resend_team_invitation(
 
     return {
         "status": "ok",
-        "message": f"Invitation email successfully resent to {email_clean} via Brevo SMTP!",
+        "message": f"Invitation email successfully resent to {email_clean}!",
         "dispatch_status": "dispatched",
         "invite_url": invite_url,
     }
