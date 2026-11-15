@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import httpx
 from pydantic import BaseModel, EmailStr, Field
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 
@@ -166,13 +166,14 @@ async def is_email_authorized_for_admin_or_team(email: str) -> tuple[bool, str, 
 
 
 @router.post("/request-otp")
-async def request_login_otp(req: OtpRequest):
+async def request_login_otp(req: OtpRequest, background_tasks: BackgroundTasks):
     """
     Requests a 6-digit OTP code for passwordless login or verification.
     STRICT SECURITY RULE:
     Only primary admin or administrator-invited team members can request or receive OTP!
     If any unauthorized email submits a request, access is blocked immediately with a 403.
     Includes a 60-second cooldown rate-limiter to prevent spamming.
+    Dispatches email in the background for instant 0-latency HTTP response.
     """
     email_clean = req.email.strip().lower()
     authorized, role, name = await is_email_authorized_for_admin_or_team(email_clean)
@@ -230,32 +231,16 @@ async def request_login_otp(req: OtpRequest):
             detail=f"Database error while generating OTP: {str(e)}"
         )
 
-    # Dispatch email (Real SMTP / Brevo API if configured, or safe mock dispatch)
-    try:
-        dispatch_res = await send_otp_email(email_clean, otp_code, name)
-    except Exception as email_err:
-        logger.error(f"[OTP] Email dispatch exception for {email_clean}: {email_err}")
-        dispatch_res = {"status": "error", "detail": str(email_err)}
-
-    dispatch_status = dispatch_res.get("status", "unknown")
-
-    # If delivery truly failed (not mock/dev), expose the real error
-    if dispatch_status not in ("sent", "mock_delivered"):
-        smtp_detail = dispatch_res.get("detail", "Unknown email error")
-        logger.error(f"[OTP] Email delivery failed for {email_clean}: {smtp_detail}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"OTP generated but email delivery failed — {smtp_detail}. "
-                   f"Please check your Brevo SMTP credentials or add BREVO_API_KEY to env vars."
-        )
+    # Fire-and-forget background email dispatch:
+    # Does NOT block the HTTP response — client receives immediate 200 OK without timeout
+    background_tasks.add_task(send_otp_email, email_clean, otp_code, name)
 
     return {
         "status": "ok",
-        "message": f"Verification code sent to {email_clean}. Please check your inbox (and spam folder).",
+        "message": f"Verification code dispatched to {email_clean}. Please check your inbox (and spam folder).",
         "email": email_clean,
         "expires_in_minutes": 10,
-        "dispatch_status": dispatch_status,
-        "otp_debug": otp_code if dispatch_status == "mock_delivered" else None,
+        "dispatch_status": "dispatched",
     }
 
 
@@ -533,12 +518,17 @@ async def list_team_and_invites(user: dict = Depends(require_admin)):
 
 
 @router.post("/team/invite")
-async def invite_team_member(req: TeamInviteRequest, request: Request, user: dict = Depends(require_admin)):
+async def invite_team_member(
+    req: TeamInviteRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_admin),
+):
     """
     Tier 1 Admin only: Invites a team member with a specified role (editor, author, or admin).
     1. Checks that email is not the Owner or an already active member.
-    2. Generates a secure 7-day invitation link.
-    3. Dispatches official invitation email via Brevo SMTP relay.
+    2. Generates a secure 7-day invitation link in DB.
+    3. Dispatches official invitation email via Brevo in BackgroundTasks (0-latency response).
     """
     email_clean = req.email.strip().lower()
     stored_admin_email, _ = await get_effective_admin_info()
@@ -599,47 +589,37 @@ async def invite_team_member(req: TeamInviteRequest, request: Request, user: dic
     invite_url = f"{frontend_base}/admin/join?token={token}"
     inviter = user.get("email", "Admin")
 
-    # Send real invitation email via Brevo SMTP
-    try:
-        dispatch_res = await send_team_invite_email(
-            to_email=email_clean,
-            invite_url=invite_url,
-            role=req.role,
-            invited_by=inviter,
-            recipient_name=req.name,
-        )
-    except Exception as email_err:
-        logger.error(f"[Invite] Email dispatch exception for {email_clean}: {email_err}")
-        dispatch_res = {"status": "error", "detail": str(email_err)}
-
-    dispatch_status = dispatch_res.get("status", "unknown")
-
-    # If SMTP failed entirely (not mock/dev), surface the real error to the caller
-    if dispatch_status not in ("sent", "mock_delivered"):
-        smtp_detail = dispatch_res.get("detail", "Unknown SMTP error")
-        logger.error(f"[Invite] SMTP failed for {email_clean}: {smtp_detail}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Invitation record created but email delivery failed. SMTP error: {smtp_detail}. "
-                   f"Use 'Copy Activation Link' on the Pending Invitations table to share the link manually."
-        )
+    # Send invitation email in the background without blocking the UI response
+    background_tasks.add_task(
+        send_team_invite_email,
+        to_email=email_clean,
+        invite_url=invite_url,
+        role=req.role,
+        invited_by=inviter,
+        recipient_name=req.name,
+    )
 
     return {
         "status": "ok",
-        "message": f"Invitation email sent to {email_clean} for role '{req.role.upper()}'!",
+        "message": f"Invitation email dispatched to {email_clean} for role '{req.role.upper()}'!",
         "token": token,
         "email": email_clean,
         "role": req.role,
         "expires_at": expires_at,
         "invite_url": invite_url,
-        "dispatch_status": dispatch_status,
+        "dispatch_status": "dispatched",
     }
 
 
 @router.post("/team/resend-invite")
-async def resend_team_invitation(req: ResendInviteRequest, request: Request, user: dict = Depends(require_admin)):
+async def resend_team_invitation(
+    req: ResendInviteRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_admin),
+):
     """
-    Tier 1 Admin only: Resends an existing pending invitation email via Brevo SMTP.
+    Tier 1 Admin only: Resends an existing pending invitation email via Brevo in BackgroundTasks.
     """
     email_clean = req.email.strip().lower()
     invites_col = get_collection("team_invitations")
@@ -655,32 +635,19 @@ async def resend_team_invitation(req: ResendInviteRequest, request: Request, use
     frontend_base = get_frontend_url(request)
     invite_url = f"{frontend_base}/admin/join?token={token}"
 
-    try:
-        dispatch_res = await send_team_invite_email(
-            to_email=email_clean,
-            invite_url=invite_url,
-            role=invite.get("role", "editor"),
-            invited_by=user.get("email", "Admin"),
-            recipient_name=invite.get("name"),
-        )
-    except Exception as email_err:
-        logger.error(f"[Resend] Email dispatch exception for {email_clean}: {email_err}")
-        dispatch_res = {"status": "error", "detail": str(email_err)}
-
-    dispatch_status = dispatch_res.get("status", "unknown")
-    if dispatch_status not in ("sent", "mock_delivered"):
-        smtp_detail = dispatch_res.get("detail", "Unknown SMTP error")
-        logger.error(f"[Resend] SMTP failed for {email_clean}: {smtp_detail}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to resend invitation email. SMTP error: {smtp_detail}. "
-                   f"Use 'Copy Link' on the Pending Invitations table to share the link manually."
-        )
+    background_tasks.add_task(
+        send_team_invite_email,
+        to_email=email_clean,
+        invite_url=invite_url,
+        role=invite.get("role", "editor"),
+        invited_by=user.get("email", "Admin"),
+        recipient_name=invite.get("name"),
+    )
 
     return {
         "status": "ok",
         "message": f"Invitation email successfully resent to {email_clean} via Brevo SMTP!",
-        "dispatch_status": dispatch_status,
+        "dispatch_status": "dispatched",
         "invite_url": invite_url,
     }
 
@@ -884,11 +851,11 @@ async def setup_initial_admin(req: InitAdminRequest):
 
 
 @router.post("/forgot-password")
-async def forgot_password(req: ForgotPasswordRequest):
+async def forgot_password(req: ForgotPasswordRequest, background_tasks: BackgroundTasks):
     """
     Generates a 6-digit OTP for admin password reset.
     Validates that only authorized admins or invited team members can reset password.
-    Dispatches OTP via real SMTP or secure system dispatch.
+    Dispatches OTP via background task for zero HTTP latency.
     """
     email_clean = req.email.strip().lower()
     authorized, role, name = await is_email_authorized_for_admin_or_team(email_clean)
@@ -944,12 +911,13 @@ async def forgot_password(req: ForgotPasswordRequest):
             detail=f"MongoDB connection issue: {str(e)}. Please ensure MongoDB Atlas Network Access allows 0.0.0.0/0."
         )
 
-    dispatch_res = await send_otp_email(email_clean, otp_code, name)
+    # Dispatch email in background
+    background_tasks.add_task(send_otp_email, email_clean, otp_code, name)
 
     return {
         "status": "ok",
         "message": f"Password reset OTP sent to {email_clean}. Please check your inbox.",
-        "otp_debug": otp_code if dispatch_res.get("status") == "mock_delivered" else None,
+        "dispatch_status": "dispatched",
     }
 
 
