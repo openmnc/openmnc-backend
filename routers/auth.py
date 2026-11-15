@@ -57,16 +57,16 @@ class StaffEmailRequest(BaseModel):
     email: EmailStr
 
 
-async def get_effective_admin_hash() -> str:
-    """Fetch stored password hash from DB or fallback to environment variable."""
+async def get_effective_admin_info() -> tuple[str, str]:
+    """Fetch stored email and password hash from DB or fallback to environment variable."""
     try:
         col = get_collection("site_settings")
         doc = await col.find_one({"_id": "admin_credentials"})
         if doc and "password_hash" in doc:
-            return doc["password_hash"]
+            return doc.get("email", ADMIN_EMAIL).lower(), doc["password_hash"]
     except Exception as e:
         logger.warning(f"Could not read admin credentials from DB: {e}")
-    return ADMIN_PASSWORD_HASH
+    return ADMIN_EMAIL.lower(), ADMIN_PASSWORD_HASH
 
 
 @router.post("/login")
@@ -76,16 +76,15 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     Returns a JWT access token on success.
     """
     input_email = form_data.username.lower()
-    is_primary_admin = (input_email == ADMIN_EMAIL.lower())
+    stored_admin_email, current_hash = await get_effective_admin_info()
+    is_primary_admin = (input_email == stored_admin_email or input_email == ADMIN_EMAIL.lower())
 
-    current_hash = await get_effective_admin_hash()
-    
     # If primary admin
     if is_primary_admin:
         if not current_hash:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Admin password is not initialized yet. Please click 'Forgot password?' or use First Time Setup to set your password.",
+                detail="Admin password is not initialized yet. Please click '★ First Time Here? Set Admin Password' below to set your password.",
             )
         if not verify_password(form_data.password, current_hash):
             raise HTTPException(
@@ -93,7 +92,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
                 detail="Invalid credentials. Please verify your email and password.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        access_token = create_access_token(data={"sub": ADMIN_EMAIL})
+        access_token = create_access_token(data={"sub": input_email})
         return {"access_token": access_token, "token_type": "bearer", "role": "admin"}
 
     # If employee / staff member
@@ -168,11 +167,9 @@ async def google_login(req: GoogleLoginRequest):
 @router.post("/setup-admin")
 async def setup_initial_admin(req: InitAdminRequest):
     """
-    Allow setting the admin password if no credentials exist in DB yet.
+    Allow setting the admin credentials if not yet initialized.
+    Accepts amit@openmnc.com or the owner's chosen admin email.
     """
-    if req.email.lower() != ADMIN_EMAIL.lower():
-        raise HTTPException(status_code=403, detail=f"Setup is only permitted for primary admin email: {ADMIN_EMAIL}")
-
     col = get_collection("site_settings")
     existing = await col.find_one({"_id": "admin_credentials"})
     if existing and existing.get("password_hash"):
@@ -184,22 +181,29 @@ async def setup_initial_admin(req: InitAdminRequest):
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
 
+    user_email = req.email.lower()
     new_hash = hash_password(req.password)
     await col.update_one(
         {"_id": "admin_credentials"},
         {
             "$set": {
                 "password_hash": new_hash,
-                "email": req.email.lower(),
+                "email": user_email,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
         },
         upsert=True,
     )
-    access_token = create_access_token(data={"sub": req.email.lower()})
+    # Also add to authorized staff list so Google sign-in works immediately
+    await col.update_one(
+        {"_id": "authorized_staff"},
+        {"$addToSet": {"emails": user_email}},
+        upsert=True,
+    )
+    access_token = create_access_token(data={"sub": user_email})
     return {
         "status": "ok",
-        "message": "Admin credentials successfully configured! You are now logged in.",
+        "message": f"Admin credentials successfully initialized for {user_email}!",
         "access_token": access_token,
     }
 
