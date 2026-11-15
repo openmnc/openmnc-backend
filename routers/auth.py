@@ -230,16 +230,32 @@ async def request_login_otp(req: OtpRequest):
             detail=f"Database error while generating OTP: {str(e)}"
         )
 
-    # Dispatch email (Real SMTP if configured, or safe mock dispatch)
-    dispatch_res = await send_otp_email(email_clean, otp_code, name)
+    # Dispatch email (Real SMTP / Brevo API if configured, or safe mock dispatch)
+    try:
+        dispatch_res = await send_otp_email(email_clean, otp_code, name)
+    except Exception as email_err:
+        logger.error(f"[OTP] Email dispatch exception for {email_clean}: {email_err}")
+        dispatch_res = {"status": "error", "detail": str(email_err)}
+
+    dispatch_status = dispatch_res.get("status", "unknown")
+
+    # If delivery truly failed (not mock/dev), expose the real error
+    if dispatch_status not in ("sent", "mock_delivered"):
+        smtp_detail = dispatch_res.get("detail", "Unknown email error")
+        logger.error(f"[OTP] Email delivery failed for {email_clean}: {smtp_detail}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"OTP generated but email delivery failed — {smtp_detail}. "
+                   f"Please check your Brevo SMTP credentials or add BREVO_API_KEY to env vars."
+        )
 
     return {
         "status": "ok",
         "message": f"Verification code sent to {email_clean}. Please check your inbox (and spam folder).",
         "email": email_clean,
         "expires_in_minutes": 10,
-        "dispatch_status": dispatch_res.get("status"),
-        "otp_debug": otp_code if dispatch_res.get("status") == "mock_delivered" else None,
+        "dispatch_status": dispatch_status,
+        "otp_debug": otp_code if dispatch_status == "mock_delivered" else None,
     }
 
 
