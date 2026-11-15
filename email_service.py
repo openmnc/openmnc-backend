@@ -189,10 +189,15 @@ OpenMNC Security Team
 https://openmnc.com
 """
 
+    import uuid
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"{cfg['from_name']} <{cfg['from_email']}>"
     msg["To"] = to_email
+    msg["Reply-To"] = cfg["from_email"]
+    msg["Message-ID"] = f"<{uuid.uuid4()}@openmnc.com>"
+    msg["X-Mailer"] = "OpenMNC Secure Mailer v2"
+    msg["Auto-Submitted"] = "auto-generated"
     msg.attach(MIMEText(text_content, "plain"))
     msg.attach(MIMEText(html_content, "html"))
 
@@ -344,10 +349,15 @@ OpenMNC Team
 https://openmnc.com
 """
 
+    import uuid
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"{cfg['from_name']} <{cfg['from_email']}>"
     msg["To"] = to_email
+    msg["Reply-To"] = cfg["from_email"]
+    msg["Message-ID"] = f"<{uuid.uuid4()}@openmnc.com>"
+    msg["X-Mailer"] = "OpenMNC Secure Mailer v2"
+    msg["Auto-Submitted"] = "auto-generated"
     msg.attach(MIMEText(text_content, "plain"))
     msg.attach(MIMEText(html_content, "html"))
 
@@ -357,9 +367,11 @@ https://openmnc.com
         if ok:
             return {"status": "sent", "provider": "brevo_smtp", "recipient": to_email, "detail": detail}
         else:
-            logger.error(f"[EmailService] All SMTP ports failed for invite: {detail}")
+            logger.error(f"[EmailService] All SMTP ports failed for invite to {to_email}: {detail}")
+            # Don't silently fall through to mock — return a real error so the API can surface it
+            return {"status": "smtp_failed", "provider": "brevo_smtp", "recipient": to_email, "detail": detail}
 
-    # 2. Resend API fallback
+    # 2. Resend API fallback (only if SMTP is not configured at all)
     if cfg["resend_key"]:
         try:
             import httpx
@@ -377,10 +389,15 @@ https://openmnc.com
                 if res.status_code in (200, 201):
                     logger.info(f"[EmailService] Resend API dispatched invite to {to_email}")
                     return {"status": "sent", "provider": "resend", "recipient": to_email}
+                else:
+                    err_body = res.text[:300]
+                    logger.error(f"[EmailService] Resend API error {res.status_code}: {err_body}")
+                    return {"status": "resend_failed", "detail": f"Resend HTTP {res.status_code}: {err_body}"}
         except Exception as e:
             logger.error(f"[EmailService] Resend dispatch error: {e}")
+            return {"status": "resend_failed", "detail": str(e)}
 
-    # 3. Development Fallback
+    # 3. Development Fallback (only when NO email provider is configured at all)
     logger.info(f"[EmailService] Mock Dispatch Invite: {to_email} -> {invite_url}")
     print(f"\n=======================================================")
     print(f"[OPENMNC INVITATION DISPATCH]")

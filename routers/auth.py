@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import httpx
 from pydantic import BaseModel, EmailStr, Field
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 
@@ -39,6 +39,24 @@ PERMANENT_OWNER_EMAILS = {
     "amit@openmnc.com",
     "openmnc.contract@gmail.com",
 }
+
+
+def get_frontend_url(request: Optional[Request] = None) -> str:
+    """
+    Guarantees public links in emails and invites use the live public website URL
+    (https://www.openmnc.com) instead of an unreachable localhost address.
+    """
+    env_url = (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
+    if env_url and "localhost" not in env_url and "127.0.0.1" not in env_url:
+        return env_url
+    if request:
+        origin = request.headers.get("origin") or request.headers.get("referer")
+        if origin:
+            from urllib.parse import urlparse
+            parsed = urlparse(origin)
+            if parsed.scheme and parsed.netloc and "localhost" not in parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}"
+    return "https://www.openmnc.com"
 
 
 class OtpRequest(BaseModel):
@@ -499,7 +517,7 @@ async def list_team_and_invites(user: dict = Depends(require_admin)):
 
 
 @router.post("/team/invite")
-async def invite_team_member(req: TeamInviteRequest, user: dict = Depends(require_admin)):
+async def invite_team_member(req: TeamInviteRequest, request: Request, user: dict = Depends(require_admin)):
     """
     Tier 1 Admin only: Invites a team member with a specified role (editor, author, or admin).
     1. Checks that email is not the Owner or an already active member.
@@ -513,53 +531,82 @@ async def invite_team_member(req: TeamInviteRequest, user: dict = Depends(requir
     if email_clean in all_owner_emails:
         raise HTTPException(status_code=400, detail="The Founder / Primary Administrator is already permanently active.")
 
+    # Check if already an active (non-revoked) member
     team_col = get_collection("team_members")
+    existing_member = await team_col.find_one({"_id": email_clean})
+    if existing_member and existing_member.get("status") == "active":
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{email_clean}' is already an active team member. Revoke their access first if you want to re-invite them."
+        )
+
     token = secrets.token_urlsafe(24)
     now = datetime.now(timezone.utc)
     expires_at = (now + timedelta(days=7)).isoformat()
 
     invites_col = get_collection("team_invitations")
-    # Cancel any previous pending invites for this email
-    await invites_col.delete_many({"email": email_clean})
+    try:
+        # Cancel any previous pending invites for this email
+        await invites_col.delete_many({"email": email_clean})
+        await invites_col.insert_one({
+            "email": email_clean,
+            "role": req.role,
+            "name": req.name or "",
+            "token": token,
+            "invited_by": user.get("email", "Admin"),
+            "created_at": now.isoformat(),
+            "expires_at": expires_at,
+            "accepted": False,
+        })
+        # Update or insert in team_members with role and status='invited'
+        await team_col.update_one(
+            {"_id": email_clean},
+            {
+                "$set": {
+                    "email": email_clean,
+                    "name": req.name or "",
+                    "role": req.role,
+                    "status": "invited",
+                    "updated_at": now.isoformat(),
+                }
+            },
+            upsert=True,
+        )
+    except Exception as db_err:
+        logger.error(f"[Invite] Database error for {email_clean}: {db_err}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error while creating invitation: {str(db_err)}"
+        )
 
-    await invites_col.insert_one({
-        "email": email_clean,
-        "role": req.role,
-        "name": req.name or "",
-        "token": token,
-        "invited_by": user.get("email", "Admin"),
-        "created_at": now.isoformat(),
-        "expires_at": expires_at,
-        "accepted": False,
-    })
-
-    # Update or insert in team_members with role and status='invited'
-    await team_col.update_one(
-        {"_id": email_clean},
-        {
-            "$set": {
-                "email": email_clean,
-                "name": req.name or "",
-                "role": req.role,
-                "status": "invited",
-                "updated_at": now.isoformat(),
-            }
-        },
-        upsert=True,
-    )
-
-    frontend_base = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    frontend_base = get_frontend_url(request)
     invite_url = f"{frontend_base}/admin/join?token={token}"
     inviter = user.get("email", "Admin")
 
     # Send real invitation email via Brevo SMTP
-    dispatch_res = await send_team_invite_email(
-        to_email=email_clean,
-        invite_url=invite_url,
-        role=req.role,
-        invited_by=inviter,
-        recipient_name=req.name,
-    )
+    try:
+        dispatch_res = await send_team_invite_email(
+            to_email=email_clean,
+            invite_url=invite_url,
+            role=req.role,
+            invited_by=inviter,
+            recipient_name=req.name,
+        )
+    except Exception as email_err:
+        logger.error(f"[Invite] Email dispatch exception for {email_clean}: {email_err}")
+        dispatch_res = {"status": "error", "detail": str(email_err)}
+
+    dispatch_status = dispatch_res.get("status", "unknown")
+
+    # If SMTP failed entirely (not mock/dev), surface the real error to the caller
+    if dispatch_status not in ("sent", "mock_delivered"):
+        smtp_detail = dispatch_res.get("detail", "Unknown SMTP error")
+        logger.error(f"[Invite] SMTP failed for {email_clean}: {smtp_detail}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Invitation record created but email delivery failed. SMTP error: {smtp_detail}. "
+                   f"Use 'Copy Activation Link' on the Pending Invitations table to share the link manually."
+        )
 
     return {
         "status": "ok",
@@ -569,12 +616,12 @@ async def invite_team_member(req: TeamInviteRequest, user: dict = Depends(requir
         "role": req.role,
         "expires_at": expires_at,
         "invite_url": invite_url,
-        "dispatch_status": dispatch_res.get("status"),
+        "dispatch_status": dispatch_status,
     }
 
 
 @router.post("/team/resend-invite")
-async def resend_team_invitation(req: ResendInviteRequest, user: dict = Depends(require_admin)):
+async def resend_team_invitation(req: ResendInviteRequest, request: Request, user: dict = Depends(require_admin)):
     """
     Tier 1 Admin only: Resends an existing pending invitation email via Brevo SMTP.
     """
@@ -589,21 +636,35 @@ async def resend_team_invitation(req: ResendInviteRequest, user: dict = Depends(
         )
 
     token = invite.get("token") or secrets.token_urlsafe(24)
-    frontend_base = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    frontend_base = get_frontend_url(request)
     invite_url = f"{frontend_base}/admin/join?token={token}"
 
-    dispatch_res = await send_team_invite_email(
-        to_email=email_clean,
-        invite_url=invite_url,
-        role=invite.get("role", "editor"),
-        invited_by=user.get("email", "Admin"),
-        recipient_name=invite.get("name"),
-    )
+    try:
+        dispatch_res = await send_team_invite_email(
+            to_email=email_clean,
+            invite_url=invite_url,
+            role=invite.get("role", "editor"),
+            invited_by=user.get("email", "Admin"),
+            recipient_name=invite.get("name"),
+        )
+    except Exception as email_err:
+        logger.error(f"[Resend] Email dispatch exception for {email_clean}: {email_err}")
+        dispatch_res = {"status": "error", "detail": str(email_err)}
+
+    dispatch_status = dispatch_res.get("status", "unknown")
+    if dispatch_status not in ("sent", "mock_delivered"):
+        smtp_detail = dispatch_res.get("detail", "Unknown SMTP error")
+        logger.error(f"[Resend] SMTP failed for {email_clean}: {smtp_detail}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to resend invitation email. SMTP error: {smtp_detail}. "
+                   f"Use 'Copy Link' on the Pending Invitations table to share the link manually."
+        )
 
     return {
         "status": "ok",
         "message": f"Invitation email successfully resent to {email_clean} via Brevo SMTP!",
-        "dispatch_status": dispatch_res.get("status"),
+        "dispatch_status": dispatch_status,
         "invite_url": invite_url,
     }
 
