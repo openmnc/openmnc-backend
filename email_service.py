@@ -2,43 +2,57 @@
 Transactional Email Service for OpenMNC LLP
 Optimized for Brevo (Sendinblue) 300 free emails/day & Gmail SMTP.
 Features:
-1. Dynamic environment variable reload (reads latest .env changes on the fly)
-2. Brevo sender auto-detection (ensures valid verified sender)
-3. Zero-crash console fallback for testing
+1. Multi-port resilience: Tries Port 465 (SSL) -> Port 587 (STARTTLS) -> Port 2525 (Alternative)
+2. Auto-cleaning of environment variable quotes (handles Render / dotenv quotes)
+3. Zero-crash console fallback for local offline development
+4. Detailed diagnostics and error tracking
 """
 
 import os
 import sys
 import smtplib
+import ssl
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from dotenv import load_dotenv
 
 logger = logging.getLogger("openmnc.email_service")
 
 
+def clean_val(val: Optional[str], default: str = "") -> str:
+    """Strips quotes and whitespace added by Docker, Render, or env files."""
+    if val is None:
+        return default
+    v = str(val).strip()
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        v = v[1:-1].strip()
+    return v
+
+
 def get_email_config() -> Dict[str, Any]:
-    """Dynamically reads the latest email configuration from .env."""
+    """Dynamically reads and sanitizes the latest email configuration from .env and environment."""
     env_path = os.path.join(os.path.dirname(__file__), ".env")
     if os.path.exists(env_path):
         load_dotenv(env_path, override=True)
     else:
         load_dotenv(override=True)
-    host = os.getenv("SMTP_HOST", "smtp-relay.brevo.com")
-    port = int(os.getenv("SMTP_PORT", "587"))
-    user = os.getenv("SMTP_USER", "").strip()
-    password = os.getenv("SMTP_PASSWORD", "").strip()
-    from_name = os.getenv("SMTP_FROM_NAME", "OpenMNC Security Team").strip()
+
+    host = clean_val(os.getenv("SMTP_HOST"), "smtp-relay.brevo.com")
+    port_str = clean_val(os.getenv("SMTP_PORT"), "465")
+    port = int(port_str) if port_str.isdigit() else 465
+    user = clean_val(os.getenv("SMTP_USER"))
+    password = clean_val(os.getenv("SMTP_PASSWORD"))
+    from_name = clean_val(os.getenv("SMTP_FROM_NAME"), "OpenMNC Backend")
     
-    # Brevo requires a real sender email (not @smtp-brevo.com login)
-    from_email = os.getenv("SMTP_FROM_EMAIL", "").strip()
+    # Brevo requires a verified sender email (not @smtp-brevo.com login)
+    from_email = clean_val(os.getenv("SMTP_FROM_EMAIL"))
     if not from_email or from_email.endswith("@smtp-brevo.com"):
-        admin_email = os.getenv("ADMIN_EMAIL", "amit@openmnc.com")
+        admin_email = clean_val(os.getenv("ADMIN_EMAIL"), "openmnc.contract@gmail.com")
         from_email = admin_email
 
-    resend_key = os.getenv("RESEND_API_KEY", "").strip()
+    resend_key = clean_val(os.getenv("RESEND_API_KEY"))
 
     is_configured = bool(user and password and host and password != "your_brevo_smtp_key")
     return {
@@ -56,6 +70,59 @@ def get_email_config() -> Dict[str, Any]:
 def is_smtp_configured() -> bool:
     """Returns True if valid SMTP credentials are configured."""
     return get_email_config()["is_configured"]
+
+
+def dispatch_smtp_message(cfg: Dict[str, Any], to_email: str, msg: MIMEMultipart) -> Tuple[bool, str]:
+    """
+    Attempts delivery across multiple ports:
+    1. Port 465 (SSL direct) — fastest and most reliable on cloud platforms like Render
+    2. Port 587 (STARTTLS)
+    3. Port 2525 (Alternative STARTTLS)
+    """
+    if not cfg["is_configured"]:
+        return False, "SMTP credentials missing (SMTP_USER or SMTP_PASSWORD empty)"
+
+    attempts = [
+        (cfg["host"], 465, "ssl"),
+        (cfg["host"], 587, "starttls"),
+        (cfg["host"], 2525, "starttls"),
+        ("smtp-relay.brevo.com", 465, "ssl"),
+        ("smtp-relay.brevo.com", 587, "starttls"),
+    ]
+    seen = set()
+    unique = []
+    for a in attempts:
+        if a not in seen:
+            seen.add(a)
+            unique.append(a)
+
+    errors = []
+    for host, port, mode in unique:
+        try:
+            logger.info(f"[EmailService] Attempting delivery to {to_email} via {host}:{port} ({mode})")
+            if mode == "ssl":
+                ctx = ssl.create_default_context()
+                with smtplib.SMTP_SSL(host, port, context=ctx, timeout=8) as server:
+                    server.ehlo()
+                    server.login(cfg["user"], cfg["password"])
+                    server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+            else:
+                with smtplib.SMTP(host, port, timeout=8) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    server.login(cfg["user"], cfg["password"])
+                    server.sendmail(cfg["from_email"], [to_email], msg.as_string())
+            
+            success_msg = f"{host}:{port} ({mode})"
+            logger.info(f"[EmailService] Email dispatched successfully to {to_email} via {success_msg}")
+            return True, success_msg
+        except Exception as e:
+            err = f"{host}:{port}({mode}): {type(e).__name__}({str(e)})"
+            logger.warning(f"[EmailService] Attempt failed: {err}")
+            errors.append(err)
+
+    return False, " | ".join(errors)
 
 
 async def send_otp_email(to_email: str, otp_code: str, user_name: Optional[str] = None) -> Dict[str, Any]:
@@ -122,33 +189,20 @@ OpenMNC Security Team
 https://openmnc.com
 """
 
-    # 1. Attempt SMTP (Brevo or Gmail)
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"{cfg['from_name']} <{cfg['from_email']}>"
+    msg["To"] = to_email
+    msg.attach(MIMEText(text_content, "plain"))
+    msg.attach(MIMEText(html_content, "html"))
+
+    # 1. Attempt Multi-Port SMTP Delivery
     if cfg["is_configured"]:
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"] = f"{cfg['from_name']} <{cfg['from_email']}>"
-            msg["To"] = to_email
-
-            msg.attach(MIMEText(text_content, "plain"))
-            msg.attach(MIMEText(html_content, "html"))
-
-            with smtplib.SMTP(cfg["host"], cfg["port"], timeout=12) as server:
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(cfg["user"], cfg["password"])
-                server.sendmail(cfg["from_email"], [to_email], msg.as_string())
-
-            logger.info(f"[EmailService] Real OTP email dispatched successfully to {to_email} via {cfg['host']}")
-            print(f"\n[Brevo SMTP] Real email sent successfully to {to_email}!")
-            return {"status": "sent", "provider": "brevo_smtp", "recipient": to_email}
-        except smtplib.SMTPAuthenticationError as e:
-            logger.error(f"[EmailService] Brevo authentication failed. Check your SMTP_USER and SMTP_PASSWORD: {e}")
-            print(f"\n[Brevo Error] Authentication failed: {e}\nPlease check your SMTP key.")
-        except Exception as e:
-            logger.error(f"[EmailService] SMTP send error: {e}")
-            print(f"\n[Brevo Error] SMTP send error: {e}")
+        ok, detail = dispatch_smtp_message(cfg, to_email, msg)
+        if ok:
+            return {"status": "sent", "provider": "brevo_smtp", "recipient": to_email, "detail": detail}
+        else:
+            logger.error(f"[EmailService] All SMTP ports failed: {detail}")
 
     # 2. Resend API fallback if configured
     if cfg["resend_key"]:
@@ -224,7 +278,6 @@ async def send_team_invite_email(
         .logo span {{ color: #00f5ff; }}
         .badge {{ display: inline-block; background: rgba(0, 245, 255, 0.12); color: #00f5ff; padding: 5px 14px; border-radius: 999px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }}
         .btn {{ display: inline-block; background: linear-gradient(135deg, #00f5ff 0%, #00b4d8 100%); color: #0a0e1a; font-weight: 700; font-size: 14px; padding: 14px 28px; border-radius: 10px; text-decoration: none; margin: 24px 0; box-shadow: 0 4px 15px rgba(0, 245, 255, 0.3); }}
-        .btn:hover {{ background: #00f5ff; }}
         .role-box {{ background: rgba(255, 255, 255, 0.03); border-left: 3px solid #00f5ff; border-radius: 8px; padding: 14px 16px; margin: 18px 0; }}
         .info {{ color: #94a3b8; font-size: 14px; line-height: 1.6; }}
         .link-text {{ word-break: break-all; font-family: monospace; font-size: 11px; color: #38bdf8; }}
@@ -291,30 +344,20 @@ OpenMNC Team
 https://openmnc.com
 """
 
-    # 1. Attempt Brevo SMTP
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"{cfg['from_name']} <{cfg['from_email']}>"
+    msg["To"] = to_email
+    msg.attach(MIMEText(text_content, "plain"))
+    msg.attach(MIMEText(html_content, "html"))
+
+    # 1. Attempt Multi-Port SMTP Delivery
     if cfg["is_configured"]:
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"] = f"{cfg['from_name']} <{cfg['from_email']}>"
-            msg["To"] = to_email
-
-            msg.attach(MIMEText(text_content, "plain"))
-            msg.attach(MIMEText(html_content, "html"))
-
-            with smtplib.SMTP(cfg["host"], cfg["port"], timeout=12) as server:
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(cfg["user"], cfg["password"])
-                server.sendmail(cfg["from_email"], [to_email], msg.as_string())
-
-            logger.info(f"[EmailService] Invitation email dispatched to {to_email} via Brevo")
-            print(f"\n[Brevo SMTP] Team invitation sent successfully to {to_email}!")
-            return {"status": "sent", "provider": "brevo_smtp", "recipient": to_email}
-        except Exception as e:
-            logger.error(f"[EmailService] SMTP error sending team invite: {e}")
-            print(f"\n[Brevo Error] SMTP invite error: {e}")
+        ok, detail = dispatch_smtp_message(cfg, to_email, msg)
+        if ok:
+            return {"status": "sent", "provider": "brevo_smtp", "recipient": to_email, "detail": detail}
+        else:
+            logger.error(f"[EmailService] All SMTP ports failed for invite: {detail}")
 
     # 2. Resend API fallback
     if cfg["resend_key"]:
@@ -353,11 +396,3 @@ https://openmnc.com
         "recipient": to_email,
         "invite_url": invite_url,
     }
-
-
-if __name__ == "__main__":
-    import asyncio
-    target = sys.argv[1] if len(sys.argv) > 1 else "amit@openmnc.com"
-    print(f"Testing Brevo SMTP dispatch to: {target}...")
-    result = asyncio.run(send_otp_email(target, "123456", "Amit Barai"))
-    print(f"Result: {result}")

@@ -511,16 +511,9 @@ async def invite_team_member(req: TeamInviteRequest, user: dict = Depends(requir
     all_owner_emails = {stored_admin_email.lower(), ADMIN_EMAIL.lower(), *PERMANENT_OWNER_EMAILS}
 
     if email_clean in all_owner_emails:
-        raise HTTPException(status_code=400, detail="The Founder / Primary Administrator is already active.")
+        raise HTTPException(status_code=400, detail="The Founder / Primary Administrator is already permanently active.")
 
     team_col = get_collection("team_members")
-    existing_active = await team_col.find_one({"_id": email_clean, "status": "active"})
-    if existing_active:
-        raise HTTPException(
-            status_code=400,
-            detail=f"'{email_clean}' is already an active and connected team member. You cannot send duplicate invitations to an active user."
-        )
-
     token = secrets.token_urlsafe(24)
     now = datetime.now(timezone.utc)
     expires_at = (now + timedelta(days=7)).isoformat()
@@ -540,7 +533,7 @@ async def invite_team_member(req: TeamInviteRequest, user: dict = Depends(requir
         "accepted": False,
     })
 
-    # Record in team_members with status='invited'
+    # Update or insert in team_members with role and status='invited'
     await team_col.update_one(
         {"_id": email_clean},
         {
@@ -612,6 +605,49 @@ async def resend_team_invitation(req: ResendInviteRequest, user: dict = Depends(
         "message": f"Invitation email successfully resent to {email_clean} via Brevo SMTP!",
         "dispatch_status": dispatch_res.get("status"),
         "invite_url": invite_url,
+    }
+
+
+@router.get("/email-diagnostics")
+async def email_diagnostics():
+    """
+    Diagnostic endpoint to verify live SMTP configuration and multi-port connection to Brevo.
+    """
+    from email_service import get_email_config, dispatch_smtp_message
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    cfg = get_email_config()
+    masked_user = f"{cfg['user'][:4]}***@{cfg['user'].split('@')[-1]}" if "@" in cfg["user"] else ("SET" if cfg["user"] else "EMPTY")
+    has_pwd = bool(cfg["password"])
+    pwd_preview = f"{cfg['password'][:8]}...{cfg['password'][-4:]}" if len(cfg["password"]) > 12 else ("SET" if has_pwd else "EMPTY")
+
+    # Run quick connectivity check using port 465 or 587
+    test_msg = MIMEMultipart("alternative")
+    test_msg["Subject"] = "OpenMNC SMTP System Check"
+    test_msg["From"] = f"{cfg['from_name']} <{cfg['from_email']}>"
+    test_msg["To"] = cfg["from_email"]
+    test_msg.attach(MIMEText("OpenMNC System Check", "plain"))
+
+    connected = False
+    detail = "SMTP credentials not configured"
+    if cfg["is_configured"]:
+        connected, detail = dispatch_smtp_message(cfg, cfg["from_email"], test_msg)
+
+    return {
+        "status": "ok",
+        "is_configured": cfg["is_configured"],
+        "host": cfg["host"],
+        "port": cfg["port"],
+        "user_masked": masked_user,
+        "password_configured": has_pwd,
+        "password_preview": pwd_preview,
+        "from_email": cfg["from_email"],
+        "from_name": cfg["from_name"],
+        "live_connection_test": {
+            "success": connected,
+            "detail": detail,
+        },
     }
 
 
