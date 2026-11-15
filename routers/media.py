@@ -6,7 +6,7 @@ Zero binary files stored in MongoDB.
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
-from auth import get_current_admin
+from auth import get_current_admin, require_author
 from cloudinary_service import is_cloudinary_configured, upload_image_to_cloudinary
 
 router = APIRouter(prefix="/api/media", tags=["media"])
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/media", tags=["media"])
 async def upload_media(
     file: UploadFile = File(...),
     folder: str = Form("openmnc_cms"),
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_author),
 ):
     """
     Uploads an image file to Cloudinary CDN (admin/HR only).

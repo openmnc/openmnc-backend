@@ -10,7 +10,7 @@ from typing import Optional, List
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from auth import get_current_admin
+from auth import get_current_admin, require_author
 from database import get_collection
 from models.blog import BlogCreate, BlogOut, BlogUpdate
 from webhook_service import trigger_deploy_hook
@@ -53,7 +53,7 @@ async def list_blogs(
 
 @router.get("/admin/all", response_model=List[BlogOut])
 async def list_all_blogs_admin(
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_author),
 ):
     """Return all blog posts including drafts for HR/Admin CMS."""
     col = get_collection("blogs")
@@ -84,7 +84,7 @@ async def get_blog_by_slug(slug: str):
 @router.post("", response_model=BlogOut, status_code=status.HTTP_201_CREATED)
 async def create_blog(
     payload: BlogCreate,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_author),
 ):
     """Create a new blog post (admin/HR only)."""
     col = get_collection("blogs")
@@ -113,7 +113,7 @@ async def create_blog(
 async def update_blog(
     slug: str,
     payload: BlogUpdate,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_author),
 ):
     """Update an existing blog post (admin/HR only)."""
     col = get_collection("blogs")
@@ -153,7 +153,7 @@ async def update_blog(
 @router.delete("/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_blog(
     slug: str,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_author),
 ):
     """Delete a blog post (admin/HR only)."""
     col = get_collection("blogs")

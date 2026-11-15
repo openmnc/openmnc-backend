@@ -5,12 +5,13 @@ Includes login, OTP forgot password, OTP verification, password reset, and /me.
 
 import os
 import random
+import secrets
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import httpx
-from pydantic import BaseModel, EmailStr
-from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 
@@ -19,6 +20,10 @@ from auth import (
     verify_password,
     hash_password,
     get_current_admin,
+    get_current_user,
+    require_admin,
+    require_editor,
+    require_author,
     ADMIN_EMAIL,
     ADMIN_PASSWORD_HASH,
     JWT_SECRET,
@@ -53,8 +58,16 @@ class GoogleLoginRequest(BaseModel):
     credential: str
 
 
-class StaffEmailRequest(BaseModel):
+class TeamInviteRequest(BaseModel):
     email: EmailStr
+    role: str = Field("editor", pattern="^(admin|editor|author)$")
+    name: Optional[str] = None
+
+
+class AcceptInviteRequest(BaseModel):
+    token: str
+    password: str = Field(..., min_length=6)
+    name: Optional[str] = None
 
 
 async def get_effective_admin_info() -> tuple[str, str]:
@@ -72,19 +85,19 @@ async def get_effective_admin_info() -> tuple[str, str]:
 @router.post("/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     """
-    Authenticate admin or employee using email + password from form data.
-    Returns a JWT access token on success.
+    Authenticate admin or team member using email + password from form data.
+    Returns a JWT access token containing their authorized role (admin | editor | author).
     """
     input_email = form_data.username.lower()
     stored_admin_email, current_hash = await get_effective_admin_info()
     is_primary_admin = (input_email == stored_admin_email or input_email == ADMIN_EMAIL.lower())
 
-    # If primary admin
+    # 1. Primary Owner/Admin check
     if is_primary_admin:
         if not current_hash:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Admin password is not initialized yet. Please click '★ First Time Here? Set Admin Password' below to set your password.",
+                detail="Admin password is not initialized yet. Please click '★ First Time Here? Set Admin Password' below.",
             )
         if not verify_password(form_data.password, current_hash):
             raise HTTPException(
@@ -92,23 +105,26 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
                 detail="Invalid credentials. Please verify your email and password.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        access_token = create_access_token(data={"sub": input_email})
-        return {"access_token": access_token, "token_type": "bearer", "role": "admin"}
+        access_token = create_access_token(data={"sub": input_email, "role": "admin"})
+        return {"access_token": access_token, "token_type": "bearer", "role": "admin", "email": input_email}
 
-    # If employee / staff member
+    # 2. Team Members check (MongoDB collection: team_members)
     try:
-        col = get_collection("site_settings")
-        staff_doc = await col.find_one({"_id": "authorized_staff"})
-        if staff_doc:
-            staff_list = staff_doc.get("staff", [])
-            for member in staff_list:
-                if member.get("email", "").lower() == input_email:
-                    member_hash = member.get("password_hash")
-                    if member_hash and verify_password(form_data.password, member_hash):
-                        access_token = create_access_token(data={"sub": input_email})
-                        return {"access_token": access_token, "token_type": "bearer", "role": "staff"}
+        col = get_collection("team_members")
+        member = await col.find_one({"_id": input_email})
+        if member:
+            if member.get("status") == "revoked":
+                raise HTTPException(status_code=403, detail="Your team access has been revoked by an administrator.")
+            member_hash = member.get("password_hash")
+            if member_hash and verify_password(form_data.password, member_hash):
+                role = member.get("role", "editor")
+                await col.update_one({"_id": input_email}, {"$set": {"last_login": datetime.now(timezone.utc).isoformat()}})
+                access_token = create_access_token(data={"sub": input_email, "role": role})
+                return {"access_token": access_token, "token_type": "bearer", "role": role, "email": input_email}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Staff lookup error: {e}")
+        logger.warning(f"Team member lookup error: {e}")
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -120,8 +136,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 @router.post("/google-login")
 async def google_login(req: GoogleLoginRequest):
     """
-    Authenticate admin or authorized employees using Google OAuth credential.
-    Verifies token directly via Google API.
+    Authenticate admin or team member using Google OAuth credential.
+    Auto-activates pending team invitations!
     """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -141,28 +157,265 @@ async def google_login(req: GoogleLoginRequest):
         raise HTTPException(status_code=401, detail="Google account email is not verified")
 
     email_clean = email.lower()
-    role = "admin" if email_clean == ADMIN_EMAIL.lower() else None
+    stored_admin_email, _ = await get_effective_admin_info()
 
-    if not role:
-        try:
-            col = get_collection("site_settings")
-            staff_doc = await col.find_one({"_id": "authorized_staff"})
-            if staff_doc:
-                allowed_emails = [s.lower() for s in staff_doc.get("emails", [])]
-                if email_clean in allowed_emails:
-                    role = "staff"
-        except Exception:
-            pass
+    # 1. Primary Owner is always admin
+    if email_clean == stored_admin_email or email_clean == ADMIN_EMAIL.lower():
+        access_token = create_access_token(data={"sub": email_clean, "role": "admin"})
+        return {"access_token": access_token, "token_type": "bearer", "email": email_clean, "role": "admin"}
 
-    if not role:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Access denied: '{email}' is not registered as an administrator or employee for OpenMNC."
+    # 2. Check team_members
+    team_col = get_collection("team_members")
+    member = await team_col.find_one({"_id": email_clean})
+    if member:
+        if member.get("status") == "revoked":
+            raise HTTPException(status_code=403, detail="Your team access has been revoked by an administrator.")
+        role = member.get("role", "editor")
+        await team_col.update_one({"_id": email_clean}, {"$set": {"last_login": datetime.now(timezone.utc).isoformat(), "status": "active"}})
+        access_token = create_access_token(data={"sub": email_clean, "role": role})
+        return {"access_token": access_token, "token_type": "bearer", "email": email_clean, "role": role}
+
+    # 3. Check pending team_invitations (Auto-accept via Google)
+    invites_col = get_collection("team_invitations")
+    invite = await invites_col.find_one({"email": email_clean, "accepted": False})
+    if invite:
+        role = invite.get("role", "editor")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Activate member
+        await team_col.update_one(
+            {"_id": email_clean},
+            {
+                "$set": {
+                    "email": email_clean,
+                    "name": payload.get("name", ""),
+                    "role": role,
+                    "status": "active",
+                    "auth_provider": "google",
+                    "created_at": now_iso,
+                    "last_login": now_iso,
+                }
+            },
+            upsert=True,
         )
+        await invites_col.update_one({"_id": invite["_id"]}, {"$set": {"accepted": True, "accepted_at": now_iso}})
+        access_token = create_access_token(data={"sub": email_clean, "role": role})
+        return {"access_token": access_token, "token_type": "bearer", "email": email_clean, "role": role}
 
-    access_token = create_access_token(data={"sub": email_clean})
-    return {"access_token": access_token, "token_type": "bearer", "email": email_clean, "role": role}
+    raise HTTPException(
+        status_code=403,
+        detail=f"Access denied: '{email}' has not been invited by an OpenMNC administrator."
+    )
 
+
+@router.get("/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    """Return currently authenticated team member info."""
+    return user
+
+
+# ---------------------------------------------------------------------------
+# Team & Role-Based Access Control (RBAC) Management
+# ---------------------------------------------------------------------------
+
+@router.get("/team")
+async def list_team_and_invites(user: dict = Depends(require_admin)):
+    """
+    Tier 1 Admin only: Lists all team members and pending invitations.
+    """
+    team_col = get_collection("team_members")
+    invites_col = get_collection("team_invitations")
+    stored_admin_email, _ = await get_effective_admin_info()
+
+    # Active members
+    members = []
+    cursor = team_col.find({"status": {"$ne": "revoked"}}).sort("created_at", -1)
+    async for doc in cursor:
+        members.append({
+            "email": doc["_id"],
+            "name": doc.get("name", ""),
+            "role": doc.get("role", "editor"),
+            "status": doc.get("status", "active"),
+            "auth_provider": doc.get("auth_provider", "credentials"),
+            "last_login": doc.get("last_login"),
+            "is_owner": (doc["_id"] == stored_admin_email or doc["_id"] == ADMIN_EMAIL.lower()),
+        })
+
+    # Always ensure primary owner is in members list if not present
+    if not any(m["email"] == stored_admin_email for m in members):
+        members.insert(0, {
+            "email": stored_admin_email,
+            "name": "Owner Admin",
+            "role": "admin",
+            "status": "active",
+            "auth_provider": "credentials",
+            "is_owner": True,
+        })
+
+    # Pending invitations
+    invites = []
+    inv_cursor = invites_col.find({"accepted": False}).sort("created_at", -1)
+    async for doc in inv_cursor:
+        invites.append({
+            "id": str(doc["_id"]),
+            "email": doc["email"],
+            "role": doc["role"],
+            "token": doc["token"],
+            "created_at": doc.get("created_at"),
+            "expires_at": doc.get("expires_at"),
+        })
+
+    return {
+        "primary_admin": stored_admin_email,
+        "members": members,
+        "invitations": invites,
+    }
+
+
+@router.post("/team/invite")
+async def invite_team_member(req: TeamInviteRequest, user: dict = Depends(require_admin)):
+    """
+    Tier 1 Admin only: Invites a team member with a specified role (editor or author or admin).
+    Generates a secure 7-day invitation link.
+    """
+    email_clean = req.email.lower()
+    stored_admin_email, _ = await get_effective_admin_info()
+    if email_clean == stored_admin_email or email_clean == ADMIN_EMAIL.lower():
+        raise HTTPException(status_code=400, detail="The primary administrator is already active.")
+
+    token = secrets.token_urlsafe(24)
+    now = datetime.now(timezone.utc)
+    expires_at = (now + timedelta(days=7)).isoformat()
+
+    invites_col = get_collection("team_invitations")
+    # Cancel any previous pending invites for this email
+    await invites_col.delete_many({"email": email_clean})
+
+    await invites_col.insert_one({
+        "email": email_clean,
+        "role": req.role,
+        "name": req.name or "",
+        "token": token,
+        "invited_by": user["email"],
+        "created_at": now.isoformat(),
+        "expires_at": expires_at,
+        "accepted": False,
+    })
+
+    # Record in team_members with status='invited'
+    team_col = get_collection("team_members")
+    await team_col.update_one(
+        {"_id": email_clean},
+        {
+            "$set": {
+                "email": email_clean,
+                "name": req.name or "",
+                "role": req.role,
+                "status": "invited",
+                "updated_at": now.isoformat(),
+            }
+        },
+        upsert=True,
+    )
+
+    return {
+        "status": "ok",
+        "message": f"Invitation generated for {email_clean} with role '{req.role}'!",
+        "token": token,
+        "email": email_clean,
+        "role": req.role,
+        "expires_at": expires_at,
+    }
+
+
+@router.delete("/team/{email}")
+async def revoke_team_member(email: str, user: dict = Depends(require_admin)):
+    """
+    Tier 1 Admin only: Revokes a team member's access or cancels an invitation.
+    """
+    email_clean = email.lower()
+    stored_admin_email, _ = await get_effective_admin_info()
+    if email_clean == stored_admin_email or email_clean == ADMIN_EMAIL.lower():
+        raise HTTPException(status_code=400, detail="Cannot revoke the primary administrator.")
+
+    team_col = get_collection("team_members")
+    invites_col = get_collection("team_invitations")
+
+    await team_col.update_one(
+        {"_id": email_clean},
+        {"$set": {"status": "revoked", "revoked_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    await invites_col.delete_many({"email": email_clean})
+
+    return {"status": "ok", "message": f"Access for {email_clean} has been revoked."}
+
+
+@router.get("/team/verify-invite")
+async def verify_invitation(token: str = Query(..., description="Invitation token")):
+    """
+    Public: Verifies an invitation token before accepting.
+    """
+    invites_col = get_collection("team_invitations")
+    invite = await invites_col.find_one({"token": token, "accepted": False})
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invalid or expired invitation link.")
+
+    return {
+        "status": "ok",
+        "valid": True,
+        "email": invite["email"],
+        "role": invite["role"],
+        "name": invite.get("name", ""),
+    }
+
+
+@router.post("/team/accept-invite")
+async def accept_invitation(req: AcceptInviteRequest):
+    """
+    Public: Accepts an invitation, sets password, and logs in immediately.
+    """
+    invites_col = get_collection("team_invitations")
+    invite = await invites_col.find_one({"token": req.token, "accepted": False})
+    if not invite:
+        raise HTTPException(status_code=400, detail="Invalid or expired invitation token.")
+
+    email_clean = invite["email"].lower()
+    role = invite.get("role", "editor")
+    new_hash = hash_password(req.password)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    team_col = get_collection("team_members")
+    await team_col.update_one(
+        {"_id": email_clean},
+        {
+            "$set": {
+                "email": email_clean,
+                "name": req.name or invite.get("name", ""),
+                "role": role,
+                "password_hash": new_hash,
+                "status": "active",
+                "auth_provider": "credentials",
+                "created_at": now_iso,
+                "last_login": now_iso,
+            }
+        },
+        upsert=True,
+    )
+
+    await invites_col.update_one({"_id": invite["_id"]}, {"$set": {"accepted": True, "accepted_at": now_iso}})
+
+    access_token = create_access_token(data={"sub": email_clean, "role": role})
+    return {
+        "status": "ok",
+        "message": f"Welcome to OpenMNC! You have joined as {role.upper()}.",
+        "access_token": access_token,
+        "email": email_clean,
+        "role": role,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Initial Admin Setup & Recovery
+# ---------------------------------------------------------------------------
 
 @router.post("/setup-admin")
 async def setup_initial_admin(req: InitAdminRequest):
@@ -194,65 +447,29 @@ async def setup_initial_admin(req: InitAdminRequest):
         },
         upsert=True,
     )
-    # Also add to authorized staff list so Google sign-in works immediately
-    await col.update_one(
-        {"_id": "authorized_staff"},
-        {"$addToSet": {"emails": user_email}},
+    # Also register in team_members as owner admin
+    team_col = get_collection("team_members")
+    await team_col.update_one(
+        {"_id": user_email},
+        {
+            "$set": {
+                "email": user_email,
+                "name": "Owner Admin",
+                "role": "admin",
+                "password_hash": new_hash,
+                "status": "active",
+                "auth_provider": "credentials",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        },
         upsert=True,
     )
-    access_token = create_access_token(data={"sub": user_email})
+    access_token = create_access_token(data={"sub": user_email, "role": "admin"})
     return {
         "status": "ok",
         "message": f"Admin credentials successfully initialized for {user_email}!",
         "access_token": access_token,
     }
-
-
-@router.get("/me")
-async def get_me(admin: str = Depends(get_current_admin)):
-    """Return currently authenticated administrator or staff member."""
-    is_owner = (admin.lower() == ADMIN_EMAIL.lower())
-    return {"email": admin, "role": "admin" if is_owner else "staff", "is_owner": is_owner}
-
-
-@router.get("/staff")
-async def list_authorized_staff(admin: str = Depends(get_current_admin)):
-    """List all authorized employee emails (admin only)."""
-    col = get_collection("site_settings")
-    doc = await col.find_one({"_id": "authorized_staff"})
-    emails = doc.get("emails", []) if doc else []
-    return {"emails": emails, "primary_admin": ADMIN_EMAIL}
-
-
-@router.post("/staff")
-async def add_authorized_staff(req: StaffEmailRequest, admin: str = Depends(get_current_admin)):
-    """Add an employee email for dashboard & Google login access (owner only)."""
-    if admin.lower() != ADMIN_EMAIL.lower():
-        raise HTTPException(status_code=403, detail="Only the primary administrator can manage staff access.")
-
-    email_clean = req.email.lower()
-    col = get_collection("site_settings")
-    await col.update_one(
-        {"_id": "authorized_staff"},
-        {"$addToSet": {"emails": email_clean}},
-        upsert=True,
-    )
-    return {"status": "ok", "message": f"Employee '{email_clean}' successfully granted access."}
-
-
-@router.delete("/staff/{email}")
-async def remove_authorized_staff(email: str, admin: str = Depends(get_current_admin)):
-    """Revoke an employee's access (owner only)."""
-    if admin.lower() != ADMIN_EMAIL.lower():
-        raise HTTPException(status_code=403, detail="Only the primary administrator can manage staff access.")
-
-    email_clean = email.lower()
-    col = get_collection("site_settings")
-    await col.update_one(
-        {"_id": "authorized_staff"},
-        {"$pull": {"emails": email_clean}},
-    )
-    return {"status": "ok", "message": f"Employee '{email_clean}' access revoked."}
 
 
 @router.post("/forgot-password")

@@ -16,7 +16,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import EmailStr
 
-from auth import get_current_admin
+from auth import get_current_admin, require_editor
 from database import get_collection
 from google_service import append_candidate_to_google_sheet
 from webhook_service import trigger_deploy_hook
@@ -59,7 +59,7 @@ async def list_jobs(
 
 
 @router.get("/all", response_model=List[CareerOut])
-async def list_all_jobs_admin(admin: str = Depends(get_current_admin)):
+async def list_all_jobs_admin(user: dict = Depends(require_editor)):
     """Return all jobs including inactive for HR management (admin only)."""
     col = get_collection("careers")
     cursor = col.find({}).sort("posted_at", -1)
@@ -86,7 +86,7 @@ async def get_job(job_id: str):
 @router.post("", response_model=CareerOut, status_code=status.HTTP_201_CREATED)
 async def create_job(
     payload: CareerCreate,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_editor),
 ):
     """Post a new job opening (admin/HR only)."""
     col = get_collection("careers")
@@ -105,7 +105,7 @@ async def create_job(
 async def update_job(
     job_id: str,
     payload: CareerUpdate,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_editor),
 ):
     """Update an existing job opening (admin/HR only)."""
     col = get_collection("careers")
@@ -131,7 +131,7 @@ async def update_job(
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_job(
     job_id: str,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_editor),
 ):
     """Delete a job opening (admin/HR only)."""
     col = get_collection("careers")
@@ -198,7 +198,7 @@ async def track_candidate_applications(
 async def list_all_applications_admin(
     job_id: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None),
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_editor),
 ):
     """HR view of all job applications with status filters (admin only)."""
     app_col = get_collection("job_applications")
@@ -216,7 +216,7 @@ async def list_all_applications_admin(
 async def update_application_status_admin(
     application_id: str,
     payload: JobApplicationStatusUpdate,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_editor),
 ):
     """HR updates candidate application status, notes, or interview dates (admin only)."""
     app_col = get_collection("job_applications")

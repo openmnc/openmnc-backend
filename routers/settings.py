@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from auth import get_current_admin
+from auth import get_current_admin, require_admin
 from database import get_collection
 from models.settings import SiteSettingOut, SiteSettingUpdate
 
@@ -28,7 +28,7 @@ async def get_all_settings():
 async def upsert_setting(
     key: str,
     payload: SiteSettingUpdate,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_admin),
 ):
     """Create or update a site setting by key (admin only)."""
     col = get_collection("site_settings")

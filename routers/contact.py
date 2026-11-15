@@ -9,7 +9,7 @@ from typing import Optional, List
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from auth import get_current_admin
+from auth import get_current_admin, require_editor
 from database import get_collection
 from models.contact import ContactSubmission, LeadCaptureRequest, LeadOut, LeadUpdateStatus
 
@@ -87,7 +87,7 @@ async def list_contacts(
     lead_type: Optional[str] = Query(None, description="Filter by 'b2b', 'student', or 'general'"),
     lead_status: Optional[str] = Query(None, description="Filter by status ('New', 'Contacted', etc.)"),
     intent_tag: Optional[str] = Query(None, description="Filter by intent tag"),
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_editor),
 ):
     """Return all contact submissions & categorized leads, newest first (admin only)."""
     col = get_collection("contact_submissions")
@@ -107,7 +107,7 @@ async def list_contacts(
 async def update_lead_status(
     lead_id: str,
     payload: LeadUpdateStatus,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_editor),
 ):
     """Update lead status, internal notes, or team assignment (admin only)."""
     col = get_collection("contact_submissions")

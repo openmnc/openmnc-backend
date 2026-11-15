@@ -9,7 +9,7 @@ from typing import Any
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from auth import get_current_admin
+from auth import get_current_admin, require_author
 from database import get_collection
 from models.service import ServiceCreate, ServiceOut, ServiceUpdate
 from webhook_service import trigger_deploy_hook
@@ -46,7 +46,7 @@ async def get_service(slug: str):
 @router.post("", response_model=ServiceOut, status_code=status.HTTP_201_CREATED)
 async def create_service(
     payload: ServiceCreate,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_author),
 ):
     """Create a new service (admin only)."""
     col = get_collection("services")
@@ -69,7 +69,7 @@ async def create_service(
 async def update_service(
     slug: str,
     payload: ServiceUpdate,
-    admin: str = Depends(get_current_admin),
+    user: dict = Depends(require_author),
 ):
     """Update an existing service by slug (admin only)."""
     col = get_collection("services")
@@ -89,7 +89,7 @@ async def update_service(
 
 
 @router.delete("/{slug}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_service(slug: str, admin: str = Depends(get_current_admin)):
+async def delete_service(slug: str, user: dict = Depends(require_author)):
     """Delete a service by slug (admin only)."""
     col = get_collection("services")
     result = await col.delete_one({"slug": slug})
