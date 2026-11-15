@@ -26,12 +26,20 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain-text password against its bcrypt hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        import bcrypt
+        return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+    except Exception:
+        return pwd_context.verify(plain_password, hashed_password)
 
 
 def hash_password(plain_password: str) -> str:
     """Hash a plain-text password with bcrypt."""
-    return pwd_context.hash(plain_password)
+    try:
+        import bcrypt
+        return bcrypt.hashpw(plain_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    except Exception:
+        return pwd_context.hash(plain_password)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
