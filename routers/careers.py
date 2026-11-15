@@ -14,6 +14,7 @@ from typing import Optional, List
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import EmailStr
 
 from auth import get_current_admin
 from database import get_collection
