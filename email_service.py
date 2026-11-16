@@ -315,7 +315,16 @@ async def send_otp_email(to_email: str, otp_code: str, user_name: Optional[str] 
       <div class="wrapper">
         <div class="card">
           <div class="header">
-            <h1 class="logo-text">Open<span class="logo-accent">MNC</span></h1>
+            <table cellpadding="0" cellspacing="0" border="0" style="margin: 0;">
+              <tr>
+                <td style="vertical-align: middle; padding-right: 10px;">
+                  <img src="https://www.openmnc.com/logo.png" alt="OpenMNC" width="36" height="36" style="display: block; border-radius: 4px;" />
+                </td>
+                <td style="vertical-align: middle;">
+                  <h1 class="logo-text" style="margin: 0;">Open<span class="logo-accent">MNC</span></h1>
+                </td>
+              </tr>
+            </table>
             <span class="badge">Security Verification</span>
           </div>
           <div class="body">
@@ -421,7 +430,16 @@ async def send_team_invite_email(
       <div class="wrapper">
         <div class="card">
           <div class="header">
-            <h1 class="logo-text">Open<span class="logo-accent">MNC</span></h1>
+            <table cellpadding="0" cellspacing="0" border="0" style="margin: 0;">
+              <tr>
+                <td style="vertical-align: middle; padding-right: 10px;">
+                  <img src="https://www.openmnc.com/logo.png" alt="OpenMNC" width="36" height="36" style="display: block; border-radius: 4px;" />
+                </td>
+                <td style="vertical-align: middle;">
+                  <h1 class="logo-text" style="margin: 0;">Open<span class="logo-accent">MNC</span></h1>
+                </td>
+              </tr>
+            </table>
             <span class="badge">Team Invitation</span>
           </div>
           <div class="body">
