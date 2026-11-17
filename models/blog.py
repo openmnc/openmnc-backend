@@ -1,11 +1,11 @@
 """
 Blog Pydantic Models for OpenMNC LLP
 Optimized for AI recommendation engines (ChatGPT, Gemini, Claude, Perplexity)
-and Google SEO / JSON-LD Article schema.
+and Google SEO / JSON-LD Article / FAQPage schema.
 """
 
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import BaseModel, Field
 
 
@@ -25,6 +25,13 @@ class BlogBase(BaseModel):
     cta_button_text: Optional[str] = Field("Build Your Idea With OpenMNC →", example="Build Your Idea With OpenMNC →")
     meta_title: Optional[str] = None
     meta_description: Optional[str] = None
+    
+    # AEO (AI Engine Optimization) Fields
+    problem_statement: Optional[str] = None
+    technical_solution: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    faqs: Optional[List[Dict[str, str]]] = Field(default_factory=list)
+    
     is_published: bool = Field(True)
 
 
@@ -48,6 +55,10 @@ class BlogUpdate(BaseModel):
     cta_button_text: Optional[str] = None
     meta_title: Optional[str] = None
     meta_description: Optional[str] = None
+    problem_statement: Optional[str] = None
+    technical_solution: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    faqs: Optional[List[Dict[str, str]]] = None
     is_published: Optional[bool] = None
 
 

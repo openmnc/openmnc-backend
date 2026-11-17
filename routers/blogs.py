@@ -20,6 +20,8 @@ router = APIRouter(prefix="/api/blogs", tags=["blogs"])
 
 def _serialize(doc: dict) -> dict:
     doc["id"] = str(doc.pop("_id"))
+    if "faqs" not in doc or doc["faqs"] is None:
+        doc["faqs"] = []
     return doc
 
 

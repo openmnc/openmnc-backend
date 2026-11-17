@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
+from routers.services import DEFAULT_SERVICES
 
 load_dotenv()
 
@@ -415,13 +416,24 @@ async def seed():
     services_col = db["services"]
     seeded_services = 0
     skipped_services = 0
-    for svc in SERVICES:
+    for svc in DEFAULT_SERVICES:
         existing = await services_col.find_one({"slug": svc["slug"]})
         if existing:
-            print(f"[services] SKIP  — '{svc['slug']}' already exists")
+            await services_col.update_one(
+                {"slug": svc["slug"]},
+                {"$set": {
+                    "problem_statement": svc.get("problem_statement"),
+                    "technical_solution": svc.get("technical_solution"),
+                    "expected_outcome": svc.get("expected_outcome"),
+                    "faqs": svc.get("faqs", []),
+                    "sub_services": svc.get("sub_services", []),
+                    "category": svc.get("category", "B2B Enterprise"),
+                }}
+            )
+            print(f"[services] SYNCED AEO — '{svc['slug']}'")
             skipped_services += 1
         else:
-            await services_col.insert_one(svc.copy())
+            await services_col.insert_one({**svc, "updated_at": NOW})
             print(f"[services] SEEDED — '{svc['slug']}'")
             seeded_services += 1
 
