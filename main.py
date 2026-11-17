@@ -118,9 +118,9 @@ Sitemap: https://openmnc.com/sitemap.xml
 """
 
 # ---------------------------------------------------------------------------
-# Keep-Alive & Health endpoints
+# Keep-Alive & Health endpoints (supports both GET and HEAD for Render/cloud probes)
 # ---------------------------------------------------------------------------
-@app.get("/", tags=["health"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
 async def root():
     """Root entry point — returns 200 OK so visiting backend directly in browser never 404s."""
     uptime_sec = int(time.time() - SERVER_START_TIME)
@@ -139,10 +139,10 @@ async def root():
     }
 
 
-@app.get("/ping", tags=["health"])
-@app.get("/health", tags=["health"])
-@app.get("/api/ping", tags=["health"])
-@app.get("/api/health", tags=["health"])
+@app.api_route("/ping", methods=["GET", "HEAD"], tags=["health"])
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
+@app.api_route("/api/ping", methods=["GET", "HEAD"], tags=["health"])
+@app.api_route("/api/health", methods=["GET", "HEAD"], tags=["health"])
 async def ping():
     """High-frequency keep-alive endpoint for cron-job.org / UptimeRobot / internal loop."""
     uptime_sec = int(time.time() - SERVER_START_TIME)
