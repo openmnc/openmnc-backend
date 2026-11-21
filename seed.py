@@ -495,6 +495,16 @@ SITE_SETTINGS = [
     {"key": "contact_city", "value": "India", "section": "contact"},
     {"key": "founder_name", "value": "Amit Barai", "section": "about"},
     {"key": "founder_role", "value": "Founder & Director", "section": "about"},
+    {
+        "key": "google_review_url",
+        "value": "https://search.google.com/local/writereview?placeid=ChIJu2lM2mMLAjoRMqerceA25dY",
+        "section": "contact",
+    },
+    {
+        "key": "google_place_id",
+        "value": "ChIJu2lM2mMLAjoRMqerceA25dY",
+        "section": "contact",
+    },
 ]
 
 
