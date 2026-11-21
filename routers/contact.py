@@ -74,6 +74,7 @@ async def submit_contact(payload: LeadCaptureRequest):
         data["category_label"] = data["intent_tag"].replace("_", " ").title()
 
     data["status"] = "New"
+    data["wants_nda"] = bool(payload.wants_nda)
     data["submitted_at"] = now
     data["updated_at"] = now
 

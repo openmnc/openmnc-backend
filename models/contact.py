@@ -24,6 +24,7 @@ class LeadCaptureRequest(BaseModel):
     business_stage: Optional[str] = None  # "Idea Stage", "MVP / Early", "Established Business"
     budget_range: Optional[str] = None  # "< ₹50k", "₹50k - ₹2L", "₹2L - ₹10L", "₹10L+"
     project_timeline: Optional[str] = None  # "Immediate", "Within 1 Month", "Exploratory"
+    wants_nda: Optional[bool] = False  # Request mutual NDA before technical discussion
 
     # Student / EdTech Specific Fields
     education_level: Optional[str] = None  # "12th Pass", "Undergraduate", "Graduate"
@@ -65,6 +66,7 @@ class LeadOut(BaseModel):
     passing_year: Optional[str] = None
     interested_in_college_subsidy: bool = False
     interested_in_training: bool = False
+    wants_nda: bool = False
     preferred_field: Optional[str] = None
     message: Optional[str] = None
     ai_source: Optional[str] = None

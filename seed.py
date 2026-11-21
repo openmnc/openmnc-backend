@@ -37,6 +37,116 @@ NOW = datetime.now(timezone.utc)
 
 SERVICES = [
     {
+        "slug": "vibe-coded-app-audit-and-fixing",
+        "title": "Vibe-Coded & AI-Built App Audit, Security Fix & Production Launch",
+        "tagline": "AI gets you 80% there fast—the last 20% breaks in production. We ship the rest.",
+        "description": (
+            "Founders who build apps with Cursor, Lovable, Bolt, or Replit often get stuck with broken auth, "
+            "exposed API keys, or database crashes. Our senior engineers audit your codebase line-by-line, "
+            "seal security vulnerabilities, optimize slow queries, and make your app production-ready without rewriting from scratch."
+        ),
+        "features": [
+            "Line-by-line security & code audit",
+            "Supabase / Firebase RLS hardening",
+            "Stripe & Razorpay webhook stabilization",
+            "Database normalization & query indexing",
+            "Production CI/CD & error monitoring setup",
+            "100% IP ownership & NDA protected",
+        ],
+        "icon": "audit",
+        "order": 1,
+        "is_active": True,
+        "updated_at": NOW,
+    },
+    {
+        "slug": "app-store-play-store-publishing-and-approval",
+        "title": "Play Store & App Store Publishing, Policy Compliance & Rejection Fix",
+        "tagline": "Don't risk account bans or weeks of rejection loops. We stay until your app is live.",
+        "description": (
+            "We audit your mobile build against Apple App Store & Google Play Console review guidelines. "
+            "From fixing Apple Guideline 4.2/2.1 rejections and implementing account deletion flows, to managing "
+            "Google Play 12-tester closed testing and Data Safety forms, we handle end-to-end publishing under your own developer account."
+        ),
+        "features": [
+            "Apple Guideline 4.2, 2.1 & 5.1.1 compliance",
+            "Google Play 12-testers closed testing management",
+            "Build signing (AAB / IPA) & store console setup",
+            "Rejection appeal drafting & code remediation",
+            "In-app account deletion implementation",
+            "Published under YOUR OWN developer accounts",
+        ],
+        "icon": "apps",
+        "order": 2,
+        "is_active": True,
+        "updated_at": NOW,
+    },
+    {
+        "slug": "app-transfer-and-database-migration",
+        "title": "App Ownership Transfer, Full Database & Infrastructure Migration",
+        "tagline": "Zero data loss. Zero subscription breaks. Complete technical handover.",
+        "description": (
+            "Selling, buying, or moving an app? One wrong step can break live users or wipe databases. "
+            "We manage the complete technical handover—store accounts, databases (Firebase, Supabase, Postgres, MongoDB), "
+            "domains, and payment gateways—with zero data loss and retained ratings."
+        ),
+        "features": [
+            "App Store & Google Play transfer without losing reviews",
+            "Full database dry-run migration & verification",
+            "Stripe & RevenueCat subscription webhook continuity",
+            "Cloud, DNS, GitHub & push notification key handover",
+            "Credential rotation & security lockout post-transfer",
+            "Escrow-friendly milestone verification (Acquire.com/Flippa)",
+        ],
+        "icon": "transfer",
+        "order": 3,
+        "is_active": True,
+        "updated_at": NOW,
+    },
+    {
+        "slug": "custom-software-and-scalable-app-development",
+        "title": "Scalable Custom Software, Web & Mobile App Development",
+        "tagline": "Off-the-shelf templates hit a ceiling. We engineer scalable systems for serious businesses.",
+        "description": (
+            "We partner with ambitious founders and enterprises to build fast, secure, and scalable digital products. "
+            "From multi-tenant SaaS platforms to native iOS/Android apps and AI workflows, we handle architecture, "
+            "agile sprint development, QA, and cloud scaling with 100% source code ownership."
+        ),
+        "features": [
+            "Full-stack SaaS (React, Vite, Node, FastAPI, Postgres)",
+            "Cross-platform iOS & Android mobile apps",
+            "Autonomous AI multi-agent workflows & LLM pipelines",
+            "Internal CRM & business process automation",
+            "100% intellectual property & source code ownership",
+            "Milestone-based sprint delivery with weekly demos",
+        ],
+        "icon": "code",
+        "order": 4,
+        "is_active": True,
+        "updated_at": NOW,
+    },
+    {
+        "slug": "app-maintenance-and-support",
+        "title": "App Maintenance, DevOps, Security & Long-Term Support (AMC)",
+        "tagline": "Launching is only Day 1. We keep your software fast, updated, and secure.",
+        "description": (
+            "Annual OS/SDK updates break old mobile builds, and unmaintained code becomes vulnerable to exploits. "
+            "Our annual maintenance plans give you a dedicated engineering safety net: 24/7 uptime monitoring, "
+            "database backups, security patches, and monthly feature improvements at a fraction of an in-house team's cost."
+        ),
+        "features": [
+            "Mandatory Google Play & Apple annual SDK upgrades",
+            "24/7 uptime monitoring & automated health checks",
+            "Daily off-site database backups & disaster recovery",
+            "Priority SLA response times for critical bug fixes",
+            "Dedicated monthly engineering hours for feature updates",
+            "Server cost tuning & database performance optimization",
+        ],
+        "icon": "maintenance",
+        "order": 5,
+        "is_active": True,
+        "updated_at": NOW,
+    },
+    {
         "slug": "business-automation",
         "title": "Business Automation & AI Integration",
         "tagline": "Multiply revenue. Eliminate manual work.",
