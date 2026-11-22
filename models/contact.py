@@ -9,6 +9,8 @@ from pydantic import BaseModel, EmailStr, Field
 
 
 class LeadCaptureRequest(BaseModel):
+    model_config = {"extra": "allow"}
+
     # Form Type & Intent
     lead_type: str = Field("b2b", example="b2b")  # "b2b", "student", "general"
     intent_tag: Optional[str] = None  # e.g., "B2B_AI_AUTOMATION", "B2B_CUSTOM_APP", "STUDENT_FREE_COUNSELING", "INDUSTRIAL_TRAINING_IOT", "SOCIAL_GROWTH"
@@ -50,6 +52,8 @@ class LeadUpdateStatus(BaseModel):
 
 
 class LeadOut(BaseModel):
+    model_config = {"extra": "allow"}
+
     id: str
     lead_type: str
     intent_tag: str
