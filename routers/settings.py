@@ -4,23 +4,32 @@ Settings router — /api/settings
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from auth import get_current_admin, require_admin
 from database import get_collection
 from models.settings import SiteSettingOut, SiteSettingUpdate
+from cache import get_cached, set_cached, invalidate_cache
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 @router.get("", response_model=dict)
-async def get_all_settings():
-    """Return all site settings as a flat {key: value} dict (public)."""
+async def get_all_settings(response: Response):
+    """Return all site settings as a flat {key: value} dict (cached in RAM)."""
+    response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=600"
+    
+    cached = get_cached("site_settings")
+    if cached is not None:
+        return cached
+
     col = get_collection("site_settings")
     cursor = col.find({})
     result: dict = {}
     async for doc in cursor:
         result[doc["key"]] = doc["value"]
+    
+    set_cached("site_settings", result)
     return result
 
 
@@ -44,6 +53,7 @@ async def upsert_setting(
         upsert=True,
         return_document=True,
     )
+    invalidate_cache("site_settings")
     return SiteSettingOut(
         key=result["key"],
         value=result["value"],

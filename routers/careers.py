@@ -16,7 +16,7 @@ import os
 import re
 import uuid
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File, status
 from pydantic import EmailStr
 
 from auth import get_current_admin, require_editor
@@ -24,6 +24,7 @@ from database import get_collection
 from google_service import append_candidate_to_google_sheet
 from webhook_service import trigger_deploy_hook
 from cloudinary_service import is_cloudinary_configured, upload_document_to_cloudinary
+from cache import get_cached, set_cached, invalidate_cache
 from models.career import (
     CareerCreate,
     CareerOut,
@@ -47,10 +48,17 @@ def _serialize(doc: dict) -> dict:
 
 @router.get("", response_model=List[CareerOut])
 async def list_jobs(
+    response: Response,
     department: Optional[str] = Query(None),
     job_type: Optional[str] = Query(None),
 ):
-    """Return all active job openings (public)."""
+    """Return all active job openings (public), cached in RAM."""
+    response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=600"
+    cache_key = f"careers:{department}:{job_type}"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     col = get_collection("careers")
     query: dict = {"is_active": True}
     if department:
@@ -59,7 +67,9 @@ async def list_jobs(
         query["type"] = {"$regex": f"^{job_type}$", "$options": "i"}
 
     cursor = col.find(query).sort("posted_at", -1)
-    return [_serialize(doc) async for doc in cursor]
+    data = [_serialize(doc) async for doc in cursor]
+    set_cached(cache_key, data)
+    return data
 
 
 @router.get("/all", response_model=List[CareerOut])

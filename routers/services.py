@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 from typing import Any, Optional, List, Dict
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from auth import get_current_admin, require_author
 from database import get_collection
 from models.service import ServiceCreate, ServiceOut, ServiceUpdate
 from webhook_service import trigger_deploy_hook
+from cache import get_cached, set_cached, invalidate_cache
 
 router = APIRouter(prefix="/api/services", tags=["services"])
 
@@ -381,42 +382,44 @@ def _serialize(doc: dict) -> dict:
     return doc
 
 
+_has_checked_seed = False
+
 async def _ensure_default_services_seeded(col):
-    """Auto-seeds the 6 default OpenMNC services with AEO fields if collection is empty."""
+    """Auto-seeds the default OpenMNC services only once when needed."""
+    global _has_checked_seed
+    if _has_checked_seed:
+        return
     count = await col.count_documents({})
     if count == 0:
         now = datetime.now(timezone.utc)
         docs_to_insert = [{**s, "updated_at": now} for s in DEFAULT_SERVICES]
         await col.insert_many(docs_to_insert)
-    else:
-        # Check if existing services need AEO fields updated
-        for svc in DEFAULT_SERVICES:
-            await col.update_one(
-                {"slug": svc["slug"], "problem_statement": {"$exists": False}},
-                {"$set": {
-                    "problem_statement": svc["problem_statement"],
-                    "technical_solution": svc["technical_solution"],
-                    "expected_outcome": svc["expected_outcome"],
-                    "faqs": svc.get("faqs", []),
-                    "sub_services": svc.get("sub_services", []),
-                    "category": svc.get("category", "B2B Enterprise"),
-                }}
-            )
+    _has_checked_seed = True
 
 
 @router.get("", response_model=list[ServiceOut])
-async def list_services(all: bool = False):
+async def list_services(response: Response, all: bool = False):
     """
     Return services sorted by order.
-    If all=True, returns all services (active and inactive) for admin CMS.
-    If all=False (default), returns only active services for public website.
+    Served from RAM cache (< 5ms) to eliminate MongoDB round-trips.
     """
+    # Tell the browser & CDN to cache for 5 minutes with stale-while-revalidate
+    response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=600"
+
+    cache_key = "services:admin_all" if all else "services:public"
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     col = get_collection("services")
     await _ensure_default_services_seeded(col)
 
     query = {} if all else {"is_active": True}
     cursor = col.find(query).sort("order", 1)
-    return [_serialize(doc) async for doc in cursor]
+    data = [_serialize(doc) async for doc in cursor]
+
+    set_cached(cache_key, data)
+    return data
 
 
 @router.post("/seed-defaults", response_model=list[ServiceOut])
@@ -449,18 +452,30 @@ async def seed_default_services(user: dict = Depends(require_author)):
 
 
 @router.get("/{slug}", response_model=ServiceOut)
-async def get_service(slug: str):
-    """Return a single service by slug or alias."""
+async def get_service(slug: str, response: Response):
+    """Return a single service by slug or alias, cached in RAM."""
+    response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=600"
     actual_slug = SLUG_ALIASES.get(slug.lower(), slug.lower())
+    cache_key = f"service:{actual_slug}"
+
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     col = get_collection("services")
     doc = await col.find_one({"slug": actual_slug})
     if not doc:
         # Check if slug matches a sub_service across all services
         parent_doc = await col.find_one({"sub_services.slug": slug.lower()})
         if parent_doc:
-            return _serialize(parent_doc)
+            res = _serialize(parent_doc)
+            set_cached(cache_key, res)
+            return res
         raise HTTPException(status_code=404, detail=f"Service '{slug}' not found")
-    return _serialize(doc)
+    
+    res = _serialize(doc)
+    set_cached(cache_key, res)
+    return res
 
 
 @router.get("/{category_or_slug}/{sub_slug}", response_model=Dict[str, Any])
@@ -516,6 +531,8 @@ async def create_service(
     data["updated_at"] = now
     result = await col.insert_one(data)
     created = await col.find_one({"_id": result.inserted_id})
+    invalidate_cache("services")
+    invalidate_cache("service:")
     asyncio.create_task(trigger_deploy_hook(f"Service Created: {clean_slug}"))
     return _serialize(created)
 
@@ -539,6 +556,8 @@ async def update_service(
     )
     if not result:
         raise HTTPException(status_code=404, detail=f"Service '{slug}' not found")
+    invalidate_cache("services")
+    invalidate_cache("service:")
     asyncio.create_task(trigger_deploy_hook(f"Service Updated: {slug}"))
     return _serialize(result)
 
@@ -550,4 +569,6 @@ async def delete_service(slug: str, user: dict = Depends(require_author)):
     result = await col.delete_one({"slug": slug})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail=f"Service '{slug}' not found")
+    invalidate_cache("services")
+    invalidate_cache("service:")
     asyncio.create_task(trigger_deploy_hook(f"Service Deleted: {slug}"))

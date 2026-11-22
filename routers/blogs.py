@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from auth import get_current_admin, require_author
 from database import get_collection
 from models.blog import BlogCreate, BlogOut, BlogUpdate
 from webhook_service import trigger_deploy_hook
+from cache import get_cached, set_cached, invalidate_cache
 
 router = APIRouter(prefix="/api/blogs", tags=["blogs"])
 
@@ -27,15 +28,22 @@ def _serialize(doc: dict) -> dict:
 
 @router.get("", response_model=List[BlogOut])
 async def list_blogs(
+    response: Response,
     category: Optional[str] = Query(None, description="Filter by category"),
     search: Optional[str] = Query(None, description="Search in title or content"),
     limit: int = Query(20, ge=1, le=100),
     skip: int = Query(0, ge=0),
 ):
     """
-    Return all published blog posts (public).
-    Used by public blog hub, AI search crawlers, and RSS/Sitemaps.
+    Return all published blog posts (public), cached in RAM.
     """
+    response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=600"
+    cache_key = f"blogs:list:{category}:{search}:{limit}:{skip}"
+    
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     col = get_collection("blogs")
     query: dict = {"is_published": True}
 
@@ -50,7 +58,9 @@ async def list_blogs(
         ]
 
     cursor = col.find(query).sort("created_at", -1).skip(skip).limit(limit)
-    return [_serialize(doc) async for doc in cursor]
+    data = [_serialize(doc) async for doc in cursor]
+    set_cached(cache_key, data)
+    return data
 
 
 @router.get("/admin/all", response_model=List[BlogOut])
@@ -64,11 +74,17 @@ async def list_all_blogs_admin(
 
 
 @router.get("/{slug}", response_model=BlogOut)
-async def get_blog_by_slug(slug: str):
+async def get_blog_by_slug(slug: str, response: Response):
     """
-    Retrieve single blog post by slug.
-    Automatically increments views_count.
+    Retrieve single blog post by slug (cached in RAM).
     """
+    response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=600"
+    cache_key = f"blog:{slug}"
+    
+    cached = get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     col = get_collection("blogs")
     doc = await col.find_one_and_update(
         {"slug": slug},
@@ -80,7 +96,9 @@ async def get_blog_by_slug(slug: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Blog post with slug '{slug}' not found",
         )
-    return _serialize(doc)
+    res = _serialize(doc)
+    set_cached(cache_key, res)
+    return res
 
 
 @router.post("", response_model=BlogOut, status_code=status.HTTP_201_CREATED)
@@ -107,6 +125,7 @@ async def create_blog(
 
     result = await col.insert_one(data)
     created = await col.find_one({"_id": result.inserted_id})
+    invalidate_cache("blog")
     asyncio.create_task(trigger_deploy_hook(f"Blog Published: {payload.slug}"))
     return _serialize(created)
 
@@ -148,6 +167,7 @@ async def update_blog(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Blog post with slug '{slug}' not found",
         )
+    invalidate_cache("blog")
     asyncio.create_task(trigger_deploy_hook(f"Blog Updated: {slug}"))
     return _serialize(doc)
 
@@ -165,5 +185,6 @@ async def delete_blog(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Blog post with slug '{slug}' not found",
         )
+    invalidate_cache("blog")
     asyncio.create_task(trigger_deploy_hook(f"Blog Deleted: {slug}"))
     return None
