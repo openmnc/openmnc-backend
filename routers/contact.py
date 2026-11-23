@@ -133,3 +133,19 @@ async def update_lead_status(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
     return _serialize(doc)
+
+
+@router.delete("/{lead_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_lead(
+    lead_id: str,
+    user: dict = Depends(require_editor),
+):
+    """Permanently delete a lead/inquiry submission (admin only)."""
+    col = get_collection("contact_submissions")
+    if not ObjectId.is_valid(lead_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid lead ID")
+
+    result = await col.delete_one({"_id": ObjectId(lead_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
+    return None

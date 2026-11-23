@@ -315,3 +315,19 @@ async def update_application_status_admin(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     return _serialize(doc)
+
+
+@router.delete("/admin/applications/{application_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_application_admin(
+    application_id: str,
+    user: dict = Depends(require_editor),
+):
+    """Permanently delete a candidate job application (admin/HR only)."""
+    app_col = get_collection("job_applications")
+    if not ObjectId.is_valid(application_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid application ID")
+
+    result = await app_col.delete_one({"_id": ObjectId(application_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    return None
